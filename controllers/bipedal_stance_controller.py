@@ -110,8 +110,10 @@ class BipedalStanceController:
         mujoco.mj_jacBody(model, data, J_right[:3], J_right[3:], self._right_bid)
 
         # ---- Centroidal angular momentum -------------------------------
+        # Value is computed by MuJoCo during forward kinematics; Jacobian must be built manually.
         com_pos = compute_com_position(model, data)
-        cam, J_cam = self._compute_centroidal_angular_momentum(model, data, com_pos)
+        cam = data.subtree_angmom[0]
+        J_cam = self._compute_centroidal_angmom_jacobian(model, data, com_pos)
         # Approximate current CAM rate from joint accelerations
         cam_rate = J_cam @ data.qacc
 
@@ -234,23 +236,23 @@ class BipedalStanceController:
         )
         return tau_full[6:]
 
-    def _compute_centroidal_angular_momentum(
+    def _compute_centroidal_angmom_jacobian(
         self,
         model: mujoco.MjModel,
         data: mujoco.MjData,
         com_pos: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> np.ndarray:
         """
-        Compute centroidal angular momentum and its Jacobian.
+        Build the Jacobian of centroidal angular momentum w.r.t. joint velocities.
 
-        L = sum_i [ I_i_world * omega_i + m_i * (c_i - com) × v_i ]
+        MuJoCo computes the CAM value in ``data.subtree_angmom[0]`` during forward
+        kinematics, but does not expose its Jacobian. We construct it body-by-body:
 
         J_L = sum_i [ I_i_world * J_ang_i + m_i * skew(c_i - com) * J_lin_i ]
 
-        where J_lin_i is the Jacobian of body i's CoM.
+        where J_lin_i is the Jacobian of body i's CoM (not its origin).
         """
         nv = model.nv
-        L = np.zeros(3)
         J_L = np.zeros((3, nv))
 
         for bid in range(1, model.nbody):
@@ -283,11 +285,10 @@ class BipedalStanceController:
             #   J_lin_com = J_lin_origin - skew(offset) @ J_ang
             J_lin_com = self._J_body_lin - self._skew(com_offset_world) @ self._J_body_ang
 
-            # Accumulate
-            L += I_world @ (self._J_body_ang @ data.qvel) + m * np.cross(r_rel, J_lin_com @ data.qvel)
+            # Accumulate Jacobian only (value comes from data.subtree_angmom[0])
             J_L += I_world @ self._J_body_ang + m * self._skew(r_rel) @ J_lin_com
 
-        return L, J_L
+        return J_L
 
     @staticmethod
     def _skew(v: np.ndarray) -> np.ndarray:
