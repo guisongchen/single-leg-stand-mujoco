@@ -17,7 +17,7 @@ class BipedalStanceController:
     Full QP-based Whole-Body Controller for bipedal standing.
 
     Decision variables:
-        x = [qacc (nv); lambda_left (6); lambda_right (6)]
+        x = [qacc (nv); wrench_left (6); wrench_right (6)]
 
     Hard equality constraints:
         - Floating-base dynamics (no actuators → contact wrenches must balance)
@@ -29,8 +29,8 @@ class BipedalStanceController:
         - Unilateral contact: fz >= 0
 
     Objective (weighted least-squares on qacc only):
-        - CoM tracks a horizontal target
-        - Pelvis stays upright
+        - CoM linear acceleration tracks horizontal target
+        - Centroidal angular momentum rate drives L toward zero
         - Joint posture (lowest priority)
 
     Torques are recovered analytically from the full dynamics equation,
@@ -50,7 +50,8 @@ class BipedalStanceController:
         self.kd_pelvis = float(c.get("stance_kd_pelvis", 12.0))
 
         self.w_com = float(c.get("wbc_w_com", 100.0))
-        self.w_pelvis = float(c.get("wbc_w_pelvis", 50.0))
+        # wbc_w_pelvis is repurposed as centroidal angular momentum weight
+        self.w_cam = float(c.get("wbc_w_pelvis", 50.0))
         self.w_posture = float(c.get("wbc_w_posture", 1.0))
         self.reg = float(c.get("wbc_reg", 0.01))
         self.reg_lambda = float(c.get("wbc_reg_lambda", 1e-6))
@@ -59,6 +60,9 @@ class BipedalStanceController:
         # Foot support polygon half-size (m) from contact-sphere positions in XML
         self.foot_half_length = 0.085   # x: -0.05 … 0.12
         self.foot_half_width = 0.030    # y: -0.03 … 0.03
+
+        # Total mass for scaling centroidal-angular-momentum gains
+        self._total_mass = float(env.model.body_subtreemass[0])
 
         self.q_ref: np.ndarray | None = None
         self.com_target: np.ndarray | None = None
@@ -75,6 +79,8 @@ class BipedalStanceController:
 
         # Pre-allocate reusable buffers
         self._M = np.zeros((nv, nv))
+        self._J_body_lin = np.zeros((3, nv))
+        self._J_body_ang = np.zeros((3, nv))
 
     def reset(self) -> None:
         self.q_ref = self.env.get_actuated_qpos().copy()
@@ -92,89 +98,113 @@ class BipedalStanceController:
 
         # ---- Mass matrix & bias forces --------------------------------
         mujoco.mj_fullM(model, self._M, data.qM)
-        h = data.qfrc_bias - data.qfrc_passive
+        bias_force = data.qfrc_bias - data.qfrc_passive
 
         # ---- Jacobians -------------------------------------------------
         J_com = np.zeros((3, nv))
         mujoco.mj_jacSubtreeCom(model, data, J_com, 0)
-
-        J_pelvis = np.zeros((6, nv))
-        mujoco.mj_jacBody(model, data, J_pelvis[:3], J_pelvis[3:], self._pelvis_bid)
 
         J_left = np.zeros((6, nv))
         J_right = np.zeros((6, nv))
         mujoco.mj_jacBody(model, data, J_left[:3], J_left[3:], self._left_bid)
         mujoco.mj_jacBody(model, data, J_right[:3], J_right[3:], self._right_bid)
 
-        # ---- Desired task accelerations --------------------------------
+        # ---- Centroidal angular momentum -------------------------------
         com_pos = compute_com_position(model, data)
+        cam, J_cam = self._compute_centroidal_angular_momentum(model, data, com_pos)
+        # Approximate current CAM rate from joint accelerations
+        cam_rate = J_cam @ data.qacc
+
+        # ---- Desired task accelerations (PD + feedforward) -------------
+        # For standing, feedforward references are zero.  Explicit form
+        # makes it trivial to swap in a trajectory planner later.
         com_vel = compute_com_velocity(model, data)
-        a_com = self.kp_com * (self.com_target - com_pos) - self.kd_com * com_vel
+        com_accel_ref = np.zeros(3)
+        com_vel_ref = np.zeros(3)
+        com_accel_des = (
+            com_accel_ref
+            + self.kp_com * (self.com_target - com_pos)
+            + self.kd_com * (com_vel_ref - com_vel)
+        )
 
-        quat_err = self._quat_error(self.pelvis_quat_ref, self.env.get_pelvis_quat())
-        pelvis_omega = (J_pelvis @ data.qvel)[3:]
-        alpha_pelvis = -self.kp_pelvis * quat_err - self.kd_pelvis * pelvis_omega
+        # Scale pelvis gains by total mass so they behave similarly on
+        # angular momentum (kg·m²/s) as they did on angular acceleration (rad/s²).
+        kp_cam = self.kp_pelvis / self._total_mass
+        kd_cam = self.kd_pelvis / self._total_mass
+        cam_rate_ref = np.zeros(3)
+        cam_ref = np.zeros(3)
+        cam_rate_des = (
+            cam_rate_ref
+            + kp_cam * (cam_ref - cam)
+            + kd_cam * (cam_rate_ref - cam_rate)
+        )
 
-        a_posture = self.kp_joint * (self.q_ref - q) - self.kd_joint * dq
+        joint_accel_ref = np.zeros(nv - 6)
+        joint_vel_ref = np.zeros(nv - 6)
+        joint_accel_des = (
+            joint_accel_ref
+            + self.kp_joint * (self.q_ref - q)
+            + self.kd_joint * (joint_vel_ref - dq)
+        )
 
         # ---- Build objective (only penalise qacc) ----------------------
-        A_obj = np.vstack([
+        J_tasks_weighted = np.vstack([
             np.sqrt(self.w_com) * J_com,
-            np.sqrt(self.w_pelvis) * J_pelvis[3:],
+            np.sqrt(self.w_cam) * J_cam,
             np.sqrt(self.w_posture) * np.eye(nv)[6:],
         ])
-        b_obj = np.hstack([
-            np.sqrt(self.w_com) * a_com,
-            np.sqrt(self.w_pelvis) * alpha_pelvis,
-            np.sqrt(self.w_posture) * a_posture,
+        task_targets_weighted = np.hstack([
+            np.sqrt(self.w_com) * com_accel_des,
+            np.sqrt(self.w_cam) * cam_rate_des,
+            np.sqrt(self.w_posture) * joint_accel_des,
         ])
 
-        P_qacc = A_obj.T @ A_obj + self.reg * np.eye(nv)
-        q_qacc = -A_obj.T @ b_obj
+        hessian_qacc = J_tasks_weighted.T @ J_tasks_weighted + self.reg * np.eye(nv)
+        gradient_qacc = -J_tasks_weighted.T @ task_targets_weighted
 
-        # Extend to full decision vector [qacc; lambda_left; lambda_right]
-        P = sp.block_diag((P_qacc, self.reg_lambda * np.eye(12)), format="csc")
-        q_vec = np.hstack([q_qacc, np.zeros(12)])
+        # Extend to full decision vector [qacc; wrench_left; wrench_right]
+        qp_hessian = sp.block_diag((hessian_qacc, self.reg_lambda * np.eye(12)), format="csc")
+        qp_lin_term = np.hstack([gradient_qacc, np.zeros(12)])
 
         # ---- Equality constraints --------------------------------------
         # 1. Floating-base dynamics (6 eq)
-        #    M_fb*qacc - J_left[:,:6].T*lambda_l - J_right[:,:6].T*lambda_r = -h_fb
-        A_dyn = np.zeros((6, self._nx))
-        A_dyn[:, :nv] = self._M[:6, :]
-        A_dyn[:, nv:nv + 6] = -J_left[:, :6].T
-        A_dyn[:, nv + 6:] = -J_right[:, :6].T
-        b_dyn = -h[:6]
+        #    M_fb*qacc - J_left[:,:6].T*wrench_l - J_right[:,:6].T*wrench_r = -bias_fb
+        constr_fb = np.zeros((6, self._nx))
+        constr_fb[:, :nv] = self._M[:6, :]
+        constr_fb[:, nv:nv + 6] = -J_left[:, :6].T
+        constr_fb[:, nv + 6:] = -J_right[:, :6].T
+        rhs_fb = -bias_force[:6]
 
         # 2. Left foot fixed (6 eq)   J_left * qacc = 0
-        A_lf = np.zeros((6, self._nx))
-        A_lf[:, :nv] = J_left
-        b_lf = np.zeros(6)
+        constr_lfoot = np.zeros((6, self._nx))
+        constr_lfoot[:, :nv] = J_left
+        rhs_lfoot = np.zeros(6)
 
         # 3. Right foot fixed (6 eq)  J_right * qacc = 0
-        A_rf = np.zeros((6, self._nx))
-        A_rf[:, :nv] = J_right
-        b_rf = np.zeros(6)
+        constr_rfoot = np.zeros((6, self._nx))
+        constr_rfoot[:, :nv] = J_right
+        rhs_rfoot = np.zeros(6)
 
-        A_eq = np.vstack([A_dyn, A_lf, A_rf])
-        l_eq = np.hstack([b_dyn, b_lf, b_rf])
-        u_eq = l_eq.copy()
+        constr_eq = np.vstack([constr_fb, constr_lfoot, constr_rfoot])
+        lb_eq = np.hstack([rhs_fb, rhs_lfoot, rhs_rfoot])
+        ub_eq = lb_eq.copy()
 
         # ---- Inequality constraints (friction pyramid + CoP) -----------
-        A_ineq, l_ineq, u_ineq = self._build_wrench_cones(nv)
+        constr_ineq, lb_ineq, ub_ineq = self._build_wrench_cones(nv)
 
         # ---- Stack for OSQP --------------------------------------------
-        A_osqp = sp.csc_matrix(np.vstack([A_eq, A_ineq]))
-        l_osqp = np.hstack([l_eq, l_ineq])
-        u_osqp = np.hstack([u_eq, u_ineq])
+        constr_qp = sp.csc_matrix(np.vstack([constr_eq, constr_ineq]))
+        lb_qp = np.hstack([lb_eq, lb_ineq])
+        ub_qp = np.hstack([ub_eq, ub_ineq])
 
         # ---- Solve -----------------------------------------------------
         m = osqp.OSQP()
         m.setup(
-            P=P,
-            q=q_vec,
-            A=A_osqp,
-            l=l_osqp,
-            u=u_osqp,
+            P=qp_hessian,
+            q=qp_lin_term,
+            A=constr_qp,
+            l=lb_qp,
+            u=ub_qp,
             verbose=False,
             eps_abs=1e-5,
             eps_rel=1e-5,
@@ -191,24 +221,88 @@ class BipedalStanceController:
         self._x_prev = x_opt.copy()
 
         qacc_des = x_opt[:nv]
-        lambda_l = x_opt[nv:nv + 6]
-        lambda_r = x_opt[nv + 6:]
+        wrench_lfoot = x_opt[nv:nv + 6]
+        wrench_rfoot = x_opt[nv + 6:]
 
         # ---- Analytical torque from full dynamics ----------------------
-        # tau = (M*qacc + h - J_left^T*lambda_l - J_right^T*lambda_r)[6:]
+        # tau = (M*qacc + bias_force - J_left^T*wrench_l - J_right^T*wrench_r)[6:]
         tau_full = (
             self._M @ qacc_des
-            + h
-            - J_left.T @ lambda_l
-            - J_right.T @ lambda_r
+            + bias_force
+            - J_left.T @ wrench_lfoot
+            - J_right.T @ wrench_rfoot
         )
         return tau_full[6:]
+
+    def _compute_centroidal_angular_momentum(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        com_pos: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Compute centroidal angular momentum and its Jacobian.
+
+        L = sum_i [ I_i_world * omega_i + m_i * (c_i - com) × v_i ]
+
+        J_L = sum_i [ I_i_world * J_ang_i + m_i * skew(c_i - com) * J_lin_i ]
+
+        where J_lin_i is the Jacobian of body i's CoM.
+        """
+        nv = model.nv
+        L = np.zeros(3)
+        J_L = np.zeros((3, nv))
+
+        for bid in range(1, model.nbody):
+            m = model.body_mass[bid]
+            if m <= 0.0:
+                continue
+
+            # Body orientation (world from body)
+            R = data.ximat[bid, :9].reshape(3, 3)
+
+            # Body inertia in world frame
+            I_body = np.diag(model.body_inertia[bid, :])
+            I_world = R @ I_body @ R.T
+
+            # CoM offset in body frame → world frame
+            com_offset_body = model.body_ipos[bid, :]
+            com_offset_world = R @ com_offset_body
+
+            # Body CoM position
+            c_i = data.xipos[bid, :]
+            r_rel = c_i - com_pos
+
+            # Jacobians of body origin
+            self._J_body_lin.fill(0.0)
+            self._J_body_ang.fill(0.0)
+            mujoco.mj_jacBody(model, data, self._J_body_lin, self._J_body_ang, bid)
+
+            # Adjust linear Jacobian to body CoM:
+            #   v_com = v_origin + omega × offset
+            #   J_lin_com = J_lin_origin - skew(offset) @ J_ang
+            J_lin_com = self._J_body_lin - self._skew(com_offset_world) @ self._J_body_ang
+
+            # Accumulate
+            L += I_world @ (self._J_body_ang @ data.qvel) + m * np.cross(r_rel, J_lin_com @ data.qvel)
+            J_L += I_world @ self._J_body_ang + m * self._skew(r_rel) @ J_lin_com
+
+        return L, J_L
+
+    @staticmethod
+    def _skew(v: np.ndarray) -> np.ndarray:
+        """Skew-symmetric matrix of a 3-vector."""
+        return np.array([
+            [0.0, -v[2], v[1]],
+            [v[2], 0.0, -v[0]],
+            [-v[1], v[0], 0.0],
+        ])
 
     def _build_wrench_cones(self, nv: int):
         """
         Build friction-pyramid + CoP inequalities for both feet.
 
-        Per foot (lambda = [fx, fy, fz, tx, ty, tz]):
+        Per foot (wrench = [fx, fy, fz, tx, ty, tz]):
             fz >= 0
             |fx| <= mu*fz      →  fx - mu*fz <= 0,  -fx - mu*fz <= 0
             |fy| <= mu*fz      →  fy - mu*fz <= 0,  -fy - mu*fz <= 0
