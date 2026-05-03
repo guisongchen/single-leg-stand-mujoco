@@ -1,0 +1,72 @@
+simulation:
+  dt: 0.004166667  # 1/240 s
+  gravity: [0.0, 0.0, -9.81]
+  friction: 0.8
+  model_path: "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof.xml"
+
+robot:
+  # Floating base is excluded; these are the 23 actuated joints in qpos order
+  joint_names:
+    - left_hip_pitch_joint
+    - left_hip_roll_joint
+    - left_hip_yaw_joint
+    - left_knee_joint
+    - left_ankle_pitch_joint
+    - left_ankle_roll_joint
+    - right_hip_pitch_joint
+    - right_hip_roll_joint
+    - right_hip_yaw_joint
+    - right_knee_joint
+    - right_ankle_pitch_joint
+    - right_ankle_roll_joint
+    - waist_yaw_joint
+    - left_shoulder_pitch_joint
+    - left_shoulder_roll_joint
+    - left_shoulder_yaw_joint
+    - left_elbow_joint
+    - left_wrist_roll_joint
+    - right_shoulder_pitch_joint
+    - right_shoulder_roll_joint
+    - right_shoulder_yaw_joint
+    - right_elbow_joint
+    - right_wrist_roll_joint
+
+  body_names:
+    pelvis: pelvis
+    torso: torso_link
+    left_foot: left_ankle_roll_link
+    right_foot: right_ankle_roll_link
+
+  # Initial standing pose (radians) — slightly bent knees for stability
+  initial_qpos:
+    left_hip_pitch_joint: 0.0
+    left_hip_roll_joint: 0.0
+    left_hip_yaw_joint: 0.0
+    left_knee_joint: 0.15
+    left_ankle_pitch_joint: -0.08
+    left_ankle_roll_joint: 0.0
+    right_hip_pitch_joint: 0.0
+    right_hip_roll_joint: 0.0
+    right_hip_yaw_joint: 0.0
+    right_knee_joint: 0.15
+    right_ankle_pitch_joint: -0.08
+    right_ankle_roll_joint: 0.0
+    waist_yaw_joint: 0.0
+    left_shoulder_pitch_joint: 0.0
+    left_shoulder_roll_joint: 0.0
+    left_shoulder_yaw_joint: 0.0
+    left_elbow_joint: 0.0
+    left_wrist_roll_joint: 0.0
+    right_shoulder_pitch_joint: 0.0
+    right_shoulder_roll_joint: 0.0
+    right_shoulder_yaw_joint: 0.0
+    right_elbow_joint: 0.0
+    right_wrist_roll_joint: 0.0
+
+  # Initial pelvis position [x, y, z, qw, qx, qy, qz]
+  initial_base_pos: [0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0]
+
+control:
+  # Simple PD gains for joint-space tracking (used in test scripts)
+  kp: 80.0
+  kd: 5.0
