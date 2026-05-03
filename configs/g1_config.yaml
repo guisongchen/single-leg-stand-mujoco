@@ -70,3 +70,18 @@ control:
   # Simple PD gains for joint-space tracking (used in test scripts)
   kp: 80.0
   kd: 5.0
+
+  # Phase 1: WBC gains
+  stance_kp_joint: 100.0
+  stance_kd_joint: 8.0
+  stance_kp_com: 120.0
+  stance_kd_com: 20.0
+  stance_kp_pelvis: 80.0
+  stance_kd_pelvis: 12.0
+
+  # WBC task priority weights
+  wbc_w_foot: 1000.0
+  wbc_w_com: 100.0
+  wbc_w_pelvis: 50.0
+  wbc_w_posture: 1.0
+  wbc_reg: 0.01

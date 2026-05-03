@@ -21,7 +21,15 @@ class G1Env:
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
         self.model.opt.timestep = self.dt
         self.model.opt.gravity[:] = self.cfg["simulation"]["gravity"]
-        # MuJoCo friction is a pair attribute in the XML; we note it but do not override here.
+
+        # Stiffen foot contacts and increase rolling friction to prevent sinking/rolling
+        for foot_name in ("left_foot", "right_foot"):
+            bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                     self.cfg["robot"]["body_names"][foot_name])
+            for gid in range(self.model.ngeom):
+                if self.model.geom_bodyid[gid] == bid:
+                    self.model.geom_solref[gid][0] = 0.002
+                    self.model.geom_friction[gid][2] = 0.01
 
         self.data = mujoco.MjData(self.model)
 
@@ -226,3 +234,5 @@ class G1Env:
                     min_z = min(min_z, pos_world[2])
         if min_z != 0.0:
             self.data.qpos[2] -= min_z
+        # Pre-sink by 2 mm so initial penetration gives immediate contact force
+        self.data.qpos[2] -= 0.002
