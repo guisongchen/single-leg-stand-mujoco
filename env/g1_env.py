@@ -22,14 +22,21 @@ class G1Env:
         self.model.opt.timestep = self.dt
         self.model.opt.gravity[:] = self.cfg["simulation"]["gravity"]
 
-        # Stiffen foot contacts and increase rolling friction to prevent sinking/rolling
+        # Stiffen foot contacts and increase rolling friction to prevent sinking/rolling.
+        # Only touch collision geoms (contype > 0); skip the visual mesh.
+        foot_friction = self.cfg["simulation"].get("friction", 0.8)
         for foot_name in ("left_foot", "right_foot"):
             bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
                                      self.cfg["robot"]["body_names"][foot_name])
             for gid in range(self.model.ngeom):
-                if self.model.geom_bodyid[gid] == bid:
-                    self.model.geom_solref[gid][0] = 0.002
-                    self.model.geom_friction[gid][2] = 0.01
+                if self.model.geom_bodyid[gid] == bid and self.model.geom_contype[gid] > 0:
+                    # solref = [timeconst, dampratio]. 0.01 is stiffer than the
+                    # default 0.02 but still stable at dt = 0.002 (5x timestep).
+                    self.model.geom_solref[gid][:] = [0.01, 1.0]
+                    # friction = [slide, spin, roll].
+                    # slide from config; roll bumped to 0.1 to stop 5 mm sphere feet
+                    # from rolling freely (default roll friction is 1e-4).
+                    self.model.geom_friction[gid][:] = [foot_friction, 0.005, 0.1]
 
         self.data = mujoco.MjData(self.model)
 

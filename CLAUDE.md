@@ -67,7 +67,8 @@ If the robot falls even with `qacc_des = 0` and exact inverse dynamics, the prob
 Once the bare physics hold (robot stays upright with static torques), add feedback:
 - Prefer QP-based WBC over Jacobian-transpose for floating-base robots
 - Use hard constraints for feet-fixed tasks, not soft weighted objectives
-- Use `mj_inverse` to map desired `qacc` to joint torques
+- Full QP-WBC should include contact wrenches as explicit decision variables with friction-pyramid and CoP inequality constraints
+- Recover joint torques analytically from the full dynamics equation, not via `mj_inverse`
 
 ## Code Organization
 
@@ -94,4 +95,8 @@ Rules:
 - `_adjust_base_height()` in `g1_env.py` auto-sets pelvis z so lowest foot geom touches ground.
 - Contact force calculation must iterate `data.contact` and use `mj_contactForce` with frame rotation.
 - `mj_rne(model, data, 0, result)` computes `C(q,qvel)` including gravity; with `qvel=0` this is pure gravity bias.
-- `mj_inverse` computes `qfrc_inverse = M*qacc + C - qfrc_passive`; it does NOT account for `qfrc_constraint`. Contacts must be handled separately.
+- `mj_inverse(model, data)` computes `qfrc_inverse = M*qacc + C - qfrc_passive`; it does NOT account for `qfrc_constraint`. **The bipedal stance controller no longer uses `mj_inverse`** — torques are recovered analytically from the full dynamics equation with explicit contact wrenches.
+- Full QP-WBC decision variables: `[qacc (nv); lambda_left (6); lambda_right (6)]` solved with OSQP.
+- Hard equality constraints: floating-base dynamics + fixed-foot kinematics.
+- Hard inequality constraints: linearised friction pyramid (`|fx|,|fy| <= mu*fz`) + CoP bounds (`|tx| <= (W/2)*fz`, `|ty| <= (L/2)*fz`).
+- Torque recovery: `tau = (M*qacc + h - J_left^T*lambda_left - J_right^T*lambda_right)[6:]` where `h = qfrc_bias - qfrc_passive`.
