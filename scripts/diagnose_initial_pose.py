@@ -112,7 +112,7 @@ def sweep_poses():
                     })
 
     plt.tight_layout()
-    out_path = "docs/initial_pose_sweep.png"
+    out_path = "outputs/initial_pose_sweep.png"
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=150)
     print(f"Saved pose sweep to {out_path}")

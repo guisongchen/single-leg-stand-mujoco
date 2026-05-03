@@ -199,7 +199,7 @@ def save_logs(logs: dict, path: str = "logs/bipedal_stance_test.npz") -> None:
 # 6. Plotting
 # ------------------------------------------------------------------ #
 
-def plot_results(logs: dict, metrics: dict, out_dir: str = "docs/figures") -> None:
+def plot_results(logs: dict, metrics: dict, out_dir: str = "outputs") -> None:
     """Generate diagnostic figures from test logs."""
     os.makedirs(out_dir, exist_ok=True)
     dt = 0.002
