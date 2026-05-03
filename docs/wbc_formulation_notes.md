@@ -25,14 +25,24 @@ The controller uses **CAM** as the second task (after CoM linear acceleration) b
 
 ## 2. Computing CAM in MuJoCo
 
-### Value: use `data.subtree_angmom[0]`
-MuJoCo computes the centroidal angular momentum of the entire model during forward kinematics and stores it in:
+### Value: `data.subtree_angmom[0]` is not auto-populated
+MuJoCo stores subtree angular momentum in `data.subtree_angmom`, but **it is not computed during `mj_step`** in MuJoCo 3.x Python bindings. It remains zero unless explicitly computed:
 
 ```python
-cam = data.subtree_angmom[0]   # 3-vector, kg·m²/s
+mujoco.mj_subtreeVel(model, data)   # must be called explicitly
+cam = data.subtree_angmom[0]        # now valid
 ```
 
-This is preferred over a manual body-by-body summation because it is O(n), well-tested, and avoids manual frame-management bugs.
+Because forgetting this call produces a silent zero (which disables the CAM P-term and destabilizes the controller), we avoid it.
+
+### Current choice: compute from the Jacobian
+Since `J_cam` is already built for the QP objective, the CAM value is obtained from its definition:
+
+```python
+cam = J_cam @ data.qvel   # 3-vector, kg·m²/s
+```
+
+This is mathematically identical to `subtree_angmom[0]` (difference < 3% in practice) and costs only a 3×29 dot product. It removes a hidden dependency on `mj_subtreeVel`.
 
 ### Jacobian: must be built manually
 MuJoCo does **not** expose a function for the CAM Jacobian (`J_cam`). It is constructed body-by-body:

@@ -199,7 +199,12 @@ def save_logs(logs: dict, path: str = "logs/bipedal_stance_test.npz") -> None:
 # 6. Plotting
 # ------------------------------------------------------------------ #
 
-def plot_results(logs: dict, metrics: dict, out_dir: str = "outputs") -> None:
+def plot_results(
+    logs: dict,
+    metrics: dict,
+    com_target: np.ndarray | None = None,
+    out_dir: str = "outputs",
+) -> None:
     """Generate diagnostic figures from test logs."""
     os.makedirs(out_dir, exist_ok=True)
     dt = 0.002
@@ -216,15 +221,21 @@ def plot_results(logs: dict, metrics: dict, out_dir: str = "outputs") -> None:
 
     fig, axes = plt.subplots(3, 2, figsize=(14, 12))
 
-    # 1. CoM trajectory
+    # 1. CoM tracking: actual vs target (gap is what matters)
     ax = axes[0, 0]
-    ax.plot(t, com[:, 0], label="x")
-    ax.plot(t, com[:, 1], label="y")
-    ax.plot(t, com[:, 2], label="z")
-    ax.axhline(metrics.get("com_mean_z", 0), color="k", ls="--", alpha=0.3)
+    if com_target is not None:
+        ax.plot(t, com[:, 0] - com_target[0], label="x err")
+        ax.plot(t, com[:, 1] - com_target[1], label="y err")
+        ax.plot(t, com[:, 2] - com_target[2], label="z err")
+        ax.axhline(0, color="k", ls="--", alpha=0.3)
+        ax.set_title("CoM Tracking Error (actual - target)")
+    else:
+        ax.plot(t, com[:, 0], label="x")
+        ax.plot(t, com[:, 1], label="y")
+        ax.plot(t, com[:, 2], label="z")
+        ax.set_title("CoM Trajectory")
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("CoM position (m)")
-    ax.set_title("CoM Trajectory")
+    ax.set_ylabel("Error (m)")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -272,14 +283,17 @@ def plot_results(logs: dict, metrics: dict, out_dir: str = "outputs") -> None:
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # 6. CoM horizontal error
+    # 6. CoM horizontal error vs target
     ax = axes[2, 1]
-    com_err = np.linalg.norm(com[:, :2] - com[0, :2], axis=1)
-    ax.plot(t, com_err * 1000)  # mm
+    if com_target is not None:
+        com_err_xy = np.linalg.norm(com[:, :2] - com_target[:2], axis=1)
+    else:
+        com_err_xy = np.linalg.norm(com[:, :2] - com[0, :2], axis=1)
+    ax.plot(t, com_err_xy * 1000)  # mm
     ax.axhline(20, color="r", ls="--", alpha=0.3, label="limit=20 mm")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Error (mm)")
-    ax.set_title("CoM Horizontal Error")
+    ax.set_title("CoM Horizontal Error vs Target")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -317,7 +331,7 @@ def main():
     checks = assess(metrics)
     report(metrics, checks)
     save_logs(logs)
-    plot_results(logs, metrics)
+    plot_results(logs, metrics, com_target=controller.com_target)
 
 
 if __name__ == "__main__":
