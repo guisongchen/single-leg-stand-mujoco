@@ -137,7 +137,7 @@ def main():
     print(f"Initial contact right:  {right_foot_force_log[0, 2]:.1f} N" if len(right_foot_force_log) > 0 else "N/A")
     print(f"Solve time (mean):      {solve_times.mean()*1e6:.2f} us")
     print(f"Solve time (p99):       {solve_p99*1e6:.2f} us")
-    print(f"Budget (1/240 s):       {env.dt*1e6:.2f} us")
+    print(f"Budget (dt={env.dt*1000:.1f} ms):     {env.dt*1e6:.2f} us")
     print("-" * 60)
 
     # ---- Pass / Fail ----
