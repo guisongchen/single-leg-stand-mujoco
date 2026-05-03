@@ -4,6 +4,7 @@ import os
 
 import numpy as np
 import yaml
+import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -29,7 +30,13 @@ def run_simulation(env: G1Env, controller: BipedalStanceController,
     for step in range(n_steps):
         t0 = time.perf_counter()
 
-        ctrl = controller.compute()
+        try:
+            ctrl = controller.compute()
+        except RuntimeError as e:
+            print(f"\nController failed at step {step}: {e}")
+            logs["failed_step"] = step
+            break
+
         env.step(ctrl)
 
         if not np.all(np.isfinite(env.data.qpos)):
@@ -54,6 +61,7 @@ def _make_log_dict() -> dict:
         "pelvis_pitch": [],
         "solve_times": [],
         "nan_step": None,
+        "failed_step": None,
     }
 
 
@@ -95,6 +103,7 @@ def compute_metrics(env: G1Env, controller: BipedalStanceController,
     return {
         "n_steps": len(solves),
         "nan_detected": logs["nan_step"] is not None,
+        "failed_step": logs.get("failed_step"),
         "com_rmse": float(np.sqrt(np.mean(np.sum((com[:, :2] - com_target_xy) ** 2, axis=1)))),
         "com_mean_z": float(com[:, 2].mean()),
         "left_drift": float(np.sqrt(np.mean(np.sum((lf - lf[0]) ** 2, axis=1)))),
@@ -136,6 +145,7 @@ def report(m: dict, checks: dict) -> None:
     print("-" * 60)
     print(f"Simulated steps:        {m['n_steps']}")
     print(f"NaN detected:           {m['nan_detected']}")
+    print(f"Controller failed at:   {m['failed_step']}")
     print(f"CoM RMSE (horizontal):  {m['com_rmse']:.4f} m")
     print(f"CoM height (mean):      {m['com_mean_z']:.4f} m")
     print(f"Left foot drift RMSE:   {m['left_drift']:.4f} m")
@@ -186,7 +196,101 @@ def save_logs(logs: dict, path: str = "logs/bipedal_stance_test.npz") -> None:
 
 
 # ------------------------------------------------------------------ #
-# 6. Orchestration
+# 6. Plotting
+# ------------------------------------------------------------------ #
+
+def plot_results(logs: dict, metrics: dict, out_dir: str = "docs/figures") -> None:
+    """Generate diagnostic figures from test logs."""
+    os.makedirs(out_dir, exist_ok=True)
+    dt = 0.002
+    t = np.arange(len(logs["solve_times"])) * dt
+
+    com = np.array(logs["com_pos"])
+    lf = np.array(logs["left_foot_pos"])
+    rf = np.array(logs["right_foot_pos"])
+    lfz = np.array(logs["left_foot_fz"])
+    rfz = np.array(logs["right_foot_fz"])
+    roll = np.rad2deg(np.array(logs["pelvis_roll"]))
+    pitch = np.rad2deg(np.array(logs["pelvis_pitch"]))
+    solves = np.array(logs["solve_times"]) * 1e6
+
+    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+
+    # 1. CoM trajectory
+    ax = axes[0, 0]
+    ax.plot(t, com[:, 0], label="x")
+    ax.plot(t, com[:, 1], label="y")
+    ax.plot(t, com[:, 2], label="z")
+    ax.axhline(metrics.get("com_mean_z", 0), color="k", ls="--", alpha=0.3)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("CoM position (m)")
+    ax.set_title("CoM Trajectory")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # 2. Foot drift
+    ax = axes[0, 1]
+    ax.plot(t, np.linalg.norm(lf - lf[0], axis=1), label="left")
+    ax.plot(t, np.linalg.norm(rf - rf[0], axis=1), label="right")
+    ax.axhline(0.005, color="r", ls="--", alpha=0.3, label="limit=5 mm")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Foot drift (m)")
+    ax.set_title("Foot Position Drift")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # 3. Contact forces (vertical)
+    ax = axes[1, 0]
+    ax.plot(t, lfz[:, 2], label="left fz")
+    ax.plot(t, rfz[:, 2], label="right fz")
+    ax.axhline(10, color="r", ls="--", alpha=0.3, label="limit=10 N")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Vertical force (N)")
+    ax.set_title("Contact Forces (MuJoCo)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # 4. Pelvis orientation
+    ax = axes[1, 1]
+    ax.plot(t, roll, label="roll")
+    ax.plot(t, pitch, label="pitch")
+    ax.axhline(5, color="r", ls="--", alpha=0.3)
+    ax.axhline(-5, color="r", ls="--", alpha=0.3)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Angle (deg)")
+    ax.set_title("Pelvis Orientation")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # 5. Solve time
+    ax = axes[2, 0]
+    ax.plot(t, solves)
+    ax.axhline(2000, color="r", ls="--", alpha=0.3, label="budget=2000 us")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Solve time (us)")
+    ax.set_title("OSQP Solve Time")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # 6. CoM horizontal error
+    ax = axes[2, 1]
+    com_err = np.linalg.norm(com[:, :2] - com[0, :2], axis=1)
+    ax.plot(t, com_err * 1000)  # mm
+    ax.axhline(20, color="r", ls="--", alpha=0.3, label="limit=20 mm")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Error (mm)")
+    ax.set_title("CoM Horizontal Error")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    path = os.path.join(out_dir, "bipedal_stance_diagnostics.png")
+    plt.savefig(path, dpi=150)
+    print(f"Figure saved to {path}")
+
+
+# ------------------------------------------------------------------ #
+# 7. Orchestration
 # ------------------------------------------------------------------ #
 
 CONFIG_PATH = "configs/g1_config.yaml"
@@ -213,6 +317,7 @@ def main():
     checks = assess(metrics)
     report(metrics, checks)
     save_logs(logs)
+    plot_results(logs, metrics)
 
 
 if __name__ == "__main__":

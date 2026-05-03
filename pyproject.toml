@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "matplotlib>=3.10.9",
     "mujoco>=3.8.0",
     "numpy>=2.2.6",
     "osqp>=1.1.1",

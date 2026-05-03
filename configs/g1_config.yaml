@@ -37,15 +37,17 @@ robot:
     left_foot: left_ankle_roll_link
     right_foot: right_ankle_roll_link
 
-  # Initial standing pose (radians) — slightly bent knees for stability
+  # Initial standing pose (radians) — centred CoM over support polygon.
+  # hip=-0.1 rad leans torso back to offset the heavy upper-body mass.
+  # Knee and ankle angles are kept moderate so all foot spheres touch ground.
   initial_qpos:
-    left_hip_pitch_joint: 0.0
+    left_hip_pitch_joint: -0.1
     left_hip_roll_joint: 0.0
     left_hip_yaw_joint: 0.0
     left_knee_joint: 0.15
     left_ankle_pitch_joint: -0.08
     left_ankle_roll_joint: 0.0
-    right_hip_pitch_joint: 0.0
+    right_hip_pitch_joint: -0.1
     right_hip_roll_joint: 0.0
     right_hip_yaw_joint: 0.0
     right_knee_joint: 0.15

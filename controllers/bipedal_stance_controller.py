@@ -110,10 +110,11 @@ class BipedalStanceController:
         mujoco.mj_jacBody(model, data, J_right[:3], J_right[3:], self._right_bid)
 
         # ---- Centroidal angular momentum -------------------------------
-        # Value is computed by MuJoCo during forward kinematics; Jacobian must be built manually.
+        # MuJoCo does not populate subtree_angmom reliably in the Python bindings,
+        # so we compute the value as J_cam @ qvel and build the Jacobian manually.
         com_pos = compute_com_position(model, data)
-        cam = data.subtree_angmom[0]
         J_cam = self._compute_centroidal_angmom_jacobian(model, data, com_pos)
+        cam = J_cam @ data.qvel
         # Approximate current CAM rate from joint accelerations
         cam_rate = J_cam @ data.qacc
 
@@ -131,8 +132,9 @@ class BipedalStanceController:
 
         # Scale pelvis gains by total mass so they behave similarly on
         # angular momentum (kg·m²/s) as they did on angular acceleration (rad/s²).
-        kp_cam = self.kp_pelvis / self._total_mass
-        kd_cam = self.kd_pelvis / self._total_mass
+        # Drastically reduced because CAM rate tasks conflict with fixed feet.
+        kp_cam = self.kp_pelvis / self._total_mass * 0.1
+        kd_cam = self.kd_pelvis / self._total_mass * 0.1
         cam_rate_ref = np.zeros(3)
         cam_ref = np.zeros(3)
         cam_rate_des = (
@@ -216,8 +218,24 @@ class BipedalStanceController:
         m.warm_start(x=self._x_prev)
         res = m.solve()
 
+        # ---- Diagnostics -----------------------------------------------
+        step = int(data.time / model.opt.timestep)
+        if res.info.iter >= 1000 or res.info.status_val not in (1, 2):
+            self._print_osqp_diagnostics(
+                step=step,
+                res=res,
+                com_pos=com_pos,
+                cam=cam,
+                cam_rate_des=cam_rate_des,
+                q=q,
+                dq=dq,
+                constr_eq=constr_eq,
+                wrench_lfoot=None if res.x is None else res.x[nv:nv + 6],
+                wrench_rfoot=None if res.x is None else res.x[nv + 6:],
+            )
+
         if res.info.status_val not in (1, 2):  # 1=solved, 2=solved inaccurate
-            raise RuntimeError(f"OSQP failed: {res.info.status}")
+            raise RuntimeError(f"OSQP failed at step {step}: {res.info.status}")
 
         x_opt = res.x
         self._x_prev = x_opt.copy()
@@ -298,6 +316,54 @@ class BipedalStanceController:
             [v[2], 0.0, -v[0]],
             [-v[1], v[0], 0.0],
         ])
+
+    def _print_osqp_diagnostics(
+        self,
+        step: int,
+        res,
+        com_pos: np.ndarray,
+        cam: np.ndarray,
+        cam_rate_des: np.ndarray,
+        q: np.ndarray,
+        dq: np.ndarray,
+        constr_eq: np.ndarray,
+        wrench_lfoot: np.ndarray | None,
+        wrench_rfoot: np.ndarray | None,
+    ) -> None:
+        """Print key metrics when OSQP struggles or fails."""
+        data = self.env.data
+        model = self.env.model
+
+        print(f"\n=== OSQP diagnostic at step {step} ===")
+        print(f"  status      : {res.info.status} (val={res.info.status_val})")
+        print(f"  iterations  : {res.info.iter}")
+        print(f"  ncon        : {data.ncon}")
+
+        print(f"  com_err     : {np.linalg.norm(self.com_target - com_pos):.4f} m")
+        print(f"  cam_norm    : {np.linalg.norm(cam):.4f} kg·m²/s")
+        print(f"  cam_rate_des: {np.linalg.norm(cam_rate_des):.4f}")
+        print(f"  q_err_norm  : {np.linalg.norm(self.q_ref - q):.4f} rad")
+        print(f"  dq_norm     : {np.linalg.norm(dq):.4f} rad/s")
+
+        if wrench_lfoot is not None:
+            lf = wrench_lfoot
+            rf = wrench_rfoot
+            print(f"  QP left  fz : {lf[2]:.2f} N  |fx|/fz={abs(lf[0])/(lf[2]+1e-6):.3f}  |fy|/fz={abs(lf[1])/(lf[2]+1e-6):.3f}")
+            print(f"  QP right fz : {rf[2]:.2f} N  |fx|/fz={abs(rf[0])/(rf[2]+1e-6):.3f}  |fy|/fz={abs(rf[1])/(rf[2]+1e-6):.3f}")
+
+        # MuJoCo contact forces (ground truth)
+        from utils.kinematics import compute_contact_wrench
+        left_name = self.env.cfg["robot"]["body_names"]["left_foot"]
+        right_name = self.env.cfg["robot"]["body_names"]["right_foot"]
+        lf_mc = compute_contact_wrench(model, data, left_name)
+        rf_mc = compute_contact_wrench(model, data, right_name)
+        print(f"  MC left  fz : {lf_mc[2]:.2f} N")
+        print(f"  MC right fz : {rf_mc[2]:.2f} N")
+
+        # Equality constraint conditioning
+        print(f"  cond(constr_eq) : {np.linalg.cond(constr_eq):.2e}")
+        print(f"  warm_start_norm : {np.linalg.norm(self._x_prev):.4f}")
+        print("=" * 50)
 
     def _build_wrench_cones(self, nv: int):
         """
