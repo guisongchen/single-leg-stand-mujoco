@@ -286,22 +286,28 @@ class TransitionController(QPWBCController):
                 ]
                 support_fallback_task = None
 
-            # Swing foot tracking
+            # Swing foot tracking: vertical only.  Tracking the full xy
+            # position couples the swing leg to whatever the body has to
+            # do for balance -- the QP fights the natural lateral drift of
+            # the foot, the reaction wrenches feed back into the body, and
+            # a slow oscillation builds up over a few seconds.  All we
+            # really want is for the foot to lift clear of the ground; let
+            # the rest of the IK be a free parameter.
             swing_pos, swing_vel, swing_accel = self.swing_foot_planner.evaluate(
                 dt_phase
             )
             current_swing_pos = self.env.get_body_pos(f"{self.swing_foot_name}_foot")
             current_swing_vel = J_swing[:3] @ data.qvel
 
-            swing_accel_des = (
-                swing_accel
-                + self.swing_kp * (swing_pos - current_swing_pos)
-                + self.swing_kd * (swing_vel - current_swing_vel)
+            swing_accel_des_z = (
+                swing_accel[2]
+                + self.swing_kp * (swing_pos[2] - current_swing_pos[2])
+                + self.swing_kd * (swing_vel[2] - current_swing_vel[2])
             )
 
             swing_task = {
-                "jacobian": J_swing[:3],
-                "accel_des": swing_accel_des,
+                "jacobian": J_swing[2:3],
+                "accel_des": np.array([swing_accel_des_z]),
             }
 
             # Pelvis orientation task (keep torso upright)

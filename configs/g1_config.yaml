@@ -2,7 +2,7 @@ simulation:
   dt: 0.002  # 500 Hz, stable for humanoid contact dynamics
   gravity: [0.0, 0.0, -9.81]
   friction: 0.8
-  model_path: "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof.xml"
+  model_path: "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof_damped.xml"
 
 robot:
   # Floating base is excluded; these are the 23 actuated joints in qpos order
@@ -86,7 +86,7 @@ control:
   wbc_w_com: 100.0
   wbc_w_pelvis: 50.0
   wbc_w_posture: 1.0
-  wbc_w_swing: 0.0
+  wbc_w_swing: 10.0
   wbc_reg: 0.01
   wbc_reg_lambda: 0.001
   wbc_max_contact_force: 5000.0
@@ -105,8 +105,8 @@ transition:
   swing_rise_duration: 1.0   # seconds to reach full lift
 
   # Swing foot tracking gains (PD on acceleration)
-  swing_kp: 400.0
-  swing_kd: 40.0
+  swing_kp: 50.0
+  swing_kd: 15.0
 
   # State-switch thresholds
   swing_unload_force: 20.0   # switch to single leg when swing fz drops below this (N)
