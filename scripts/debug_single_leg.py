@@ -59,6 +59,7 @@ def run(env: G1Env, controller: TransitionController) -> dict:
         "force_right": [],
         "qp_active_names": [],
         "qp_wrenches": [],
+        "cam": [],
     }
 
     # Monkey-patch _solve_qp to capture the QP's wrench decisions.
@@ -125,6 +126,8 @@ def run(env: G1Env, controller: TransitionController) -> dict:
                 swing_ref = swing_pos.copy()
                 swing_ref_vel = np.zeros(3)
 
+            cam, _, _ = controller._compute_cam(env.model, env.data, com_actual)
+
             log["t"].append(t_now)
             log["state"].append(state)
             log["com_actual"].append(com_actual)
@@ -139,6 +142,7 @@ def run(env: G1Env, controller: TransitionController) -> dict:
             log["swing_vel"].append(swing_vel)
             log["force_left"].append(compute_contact_wrench(env.model, env.data, body_left))
             log["force_right"].append(compute_contact_wrench(env.model, env.data, body_right))
+            log["cam"].append(cam.copy())
     finally:
         controller._solve_qp = original_solve_qp
 
@@ -221,7 +225,17 @@ def plot(log: dict, controller: TransitionController) -> None:
             state_changes.append((t[idx], val))
             prev = val
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 11))
+    cam = np.array(log["cam"])
+    cam_mag = np.linalg.norm(cam, axis=1)
+    com_in_foot = com_actual[:, :2] - support_pos[:, :2]
+
+    # CoP location inside the support rectangle (foot-frame approximation):
+    # tx = cop_y * fz, ty = -cop_x * fz, so cop_x = -ty/fz, cop_y = tx/fz.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cop_x = -qp_support_ty / qp_support_fz
+        cop_y = qp_support_tx / qp_support_fz
+
+    fig, axes = plt.subplots(4, 2, figsize=(14, 14))
 
     # 1. CoM tracking error in XY
     ax = axes[0, 0]
@@ -290,7 +304,65 @@ def plot(log: dict, controller: TransitionController) -> None:
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
 
-    for ax in axes.flat:
+    # 7. CoP path inside the support rectangle (foot-frame, world-aligned)
+    ax = axes[3, 0]
+    rect_x = [-cop_x_back, cop_x_forward, cop_x_forward, -cop_x_back, -cop_x_back]
+    rect_y = [-cop_y_half, -cop_y_half, cop_y_half, cop_y_half, -cop_y_half]
+    ax.plot(rect_x, rect_y, "k-", lw=1.5, alpha=0.6)
+    single_mask_arr = states == "SINGLE_LEG"
+    # Drop divide-by-zero outliers (post-collapse fz ~ 0) and points
+    # outside the rectangle (those mean the QP gave up or the foot left
+    # the ground -- not interesting for the slow-drift question).
+    margin = 0.02
+    in_rect = (
+        (cop_x > -cop_x_back - margin)
+        & (cop_x < cop_x_forward + margin)
+        & (cop_y > -cop_y_half - margin)
+        & (cop_y < cop_y_half + margin)
+    )
+    valid = (
+        np.isfinite(cop_x)
+        & np.isfinite(cop_y)
+        & single_mask_arr
+        & (qp_support_fz > 100.0)
+        & in_rect
+    )
+    if valid.any():
+        sc = ax.scatter(
+            cop_x[valid], cop_y[valid], c=t[valid], cmap="viridis", s=4,
+        )
+        plt.colorbar(sc, ax=ax, label="time (s)")
+    ax.set_xlim(-cop_x_back - margin, cop_x_forward + margin)
+    ax.set_ylim(-cop_y_half - margin, cop_y_half + margin)
+    ax.set_xlabel("CoP x (foot frame, m)")
+    ax.set_ylabel("CoP y (foot frame, m)")
+    ax.set_title("QP CoP path inside support rectangle (SINGLE_LEG only)")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.3)
+
+    # 8. CAM magnitude and CoM-in-foot-frame xy (the slow-drift diagnostics)
+    ax = axes[3, 1]
+    ax_twin = ax.twinx()
+    ax.plot(t, com_in_foot[:, 0], label="CoM x in foot frame", color="tab:blue")
+    ax.plot(t, com_in_foot[:, 1], label="CoM y in foot frame", color="tab:orange")
+    ax.axhline(-cop_x_back, color="tab:blue", ls=":", alpha=0.4)
+    ax.axhline(cop_x_forward, color="tab:blue", ls=":", alpha=0.4)
+    ax.axhline(-cop_y_half, color="tab:orange", ls=":", alpha=0.4)
+    ax.axhline(cop_y_half, color="tab:orange", ls=":", alpha=0.4)
+    ax_twin.plot(t, cam_mag, label="|CAM|", color="tab:red", ls="--", alpha=0.7)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("CoM offset (m)")
+    ax_twin.set_ylabel("|CAM| (kg m^2/s)", color="tab:red")
+    ax_twin.tick_params(axis="y", labelcolor="tab:red")
+    ax.set_title("CoM in foot frame & centroidal angular momentum")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax_twin.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="upper left")
+    ax.grid(True, alpha=0.3)
+
+    for i, ax in enumerate(axes.flat):
+        if i == 6:  # axes[3, 0] is the CoP scatter, x-axis is not time
+            continue
         for tc, label in state_changes:
             ax.axvline(tc, color="g", ls="--", alpha=0.4)
             ax.text(tc, ax.get_ylim()[1], label, color="g",

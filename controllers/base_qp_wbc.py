@@ -96,8 +96,8 @@ class QPWBCController:
             + self.kd_com * (-com_vel)
         )
 
-        kp_cam = self.kp_pelvis / self._total_mass * 0.1
-        kd_cam = self.kd_pelvis / self._total_mass * 0.1
+        kp_cam = self.kp_pelvis / self._total_mass * 1.0
+        kd_cam = self.kd_pelvis / self._total_mass * 1.0
         cam, J_cam, cam_rate = self._compute_cam(model, data, com_pos)
         cam_rate_des = (
             kp_cam * (-cam)
