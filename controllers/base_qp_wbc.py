@@ -56,6 +56,9 @@ class QPWBCController:
         self.foot_cop_x_forward = 0.12   # CoP may extend 12 cm forward of ankle
         self.foot_cop_y_half = 0.025     # CoP envelope half-width
         self.max_contact_force = float(c.get("wbc_max_contact_force", 5000.0))
+        self.tau_limit = c.get("wbc_tau_limit", None)
+        if self.tau_limit is not None:
+            self.tau_limit = float(self.tau_limit)
 
         self._total_mass = float(env.model.body_subtreemass[0])
 
@@ -245,6 +248,34 @@ class QPWBCController:
             constr_ineq = np.zeros((0, nx))
             lb_ineq = np.zeros(0)
             ub_ineq = np.zeros(0)
+
+        # ---- Torque limits ---------------------------------------------
+        if self.tau_limit is not None:
+            nu = model.nv - 6
+            tau_min = np.full(nu, -self.tau_limit)
+            tau_max = np.full(nu, +self.tau_limit)
+
+            A_tau = np.zeros((nu, nx))
+            A_tau[:, :nv] = self._M[6:, :]
+            col = nv
+            for foot in active_feet:
+                jac = foot["jacobian"]
+                m = jac.shape[0]
+                A_tau[:, col:col + m] = -jac[:, 6:].T
+                col += m
+
+            b_tau = bias_force[6:]
+            tau_lb = tau_min - b_tau
+            tau_ub = tau_max - b_tau
+
+            if constr_ineq.shape[0] > 0:
+                constr_ineq = np.vstack([constr_ineq, A_tau])
+                lb_ineq = np.hstack([lb_ineq, tau_lb])
+                ub_ineq = np.hstack([ub_ineq, tau_ub])
+            else:
+                constr_ineq = A_tau
+                lb_ineq = tau_lb
+                ub_ineq = tau_ub
 
         # ---- Stack for OSQP --------------------------------------------
         if constr_eq.shape[0] > 0 and constr_ineq.shape[0] > 0:

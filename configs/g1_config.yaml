@@ -90,6 +90,7 @@ control:
   wbc_reg: 0.01
   wbc_reg_lambda: 0.001
   wbc_max_contact_force: 5000.0
+  wbc_tau_limit: 100.0       # QP actuator torque bound (N·m); null = disabled
 
 transition:
   # Which foot becomes the support foot during single-leg stance
