@@ -3,7 +3,14 @@ import numpy as np
 
 class ComPlanner:
     """
-    Smooth CoM trajectory using a cubic interpolation (smoothstep).
+    Smooth CoM trajectory using a quintic smoothstep (10s^3 - 15s^4 + 6s^5).
+
+    The quintic profile is C^2 across the phase boundary: position, velocity,
+    and acceleration all hit zero at s=0 and s=1. The cubic alternative
+    (3s^2 - 2s^3) leaves a 6/dur^2 jump in acceleration when entering or
+    leaving the phase, which the QP must absorb as a step in the desired
+    CoM acceleration -- the source of the lateral force chatter we saw at
+    the WEIGHT_SHIFT -> SINGLE_LEG handoff.
 
     Parameters
     ----------
@@ -33,10 +40,12 @@ class ComPlanner:
         s = np.clip(t / self.duration, 0.0, 1.0)
         s2 = s * s
         s3 = s2 * s
+        s4 = s3 * s
+        s5 = s4 * s
 
-        coeff = 3.0 * s2 - 2.0 * s3
-        dcoeff_ds = 6.0 * s - 6.0 * s2
-        d2coeff_ds2 = 6.0 - 12.0 * s
+        coeff = 10.0 * s3 - 15.0 * s4 + 6.0 * s5
+        dcoeff_ds = 30.0 * s2 - 60.0 * s3 + 30.0 * s4
+        d2coeff_ds2 = 60.0 * s - 180.0 * s2 + 120.0 * s3
 
         delta = self.target - self.start
         pos = self.start + coeff * delta

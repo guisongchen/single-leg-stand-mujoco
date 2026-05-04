@@ -6,7 +6,15 @@ class SwingFootPlanner:
     Vertical lift-and-hold trajectory for a swing foot.
 
     The horizontal position is held at the start position; only z changes.
-    This minimizes lateral disturbance during the transition.
+    The vertical profile is a quintic smoothstep z(s) = H (10s^3 - 15s^4 + 6s^5),
+    which is C^2 at both endpoints: position, velocity, and acceleration all
+    hit their target values with zero derivative across the boundary.
+
+    The previous sin(pi/2 * s) profile started lift-off at peak vertical
+    velocity (a step in dz/dt at s=0) and ended with a nonzero acceleration
+    step at s=1 -- both of these caused the QP to receive impulse-like swing
+    targets at exactly the moments the support foot was being asked to take
+    over balance.
 
     Parameters
     ----------
@@ -39,17 +47,18 @@ class SwingFootPlanner:
         accel : np.ndarray
         """
         s = np.clip(t / self.rise_duration, 0.0, 1.0)
+        s2 = s * s
+        s3 = s2 * s
+        s4 = s3 * s
+        s5 = s4 * s
 
-        # Smooth bell curve for vertical lift: sin(pi * s) for s in [0,1]
-        # After s=1, hold at lift_height.
-        if s < 1.0:
-            lift = self.lift_height * np.sin(np.pi * 0.5 * s)
-            vel_z = self.lift_height * np.pi * 0.5 / self.rise_duration * np.cos(np.pi * 0.5 * s)
-            accel_z = -self.lift_height * (np.pi * 0.5 / self.rise_duration) ** 2 * np.sin(np.pi * 0.5 * s)
-        else:
-            lift = self.lift_height
-            vel_z = 0.0
-            accel_z = 0.0
+        coeff = 10.0 * s3 - 15.0 * s4 + 6.0 * s5
+        dcoeff_ds = 30.0 * s2 - 60.0 * s3 + 30.0 * s4
+        d2coeff_ds2 = 60.0 * s - 180.0 * s2 + 120.0 * s3
+
+        lift = self.lift_height * coeff
+        vel_z = self.lift_height * dcoeff_ds / self.rise_duration
+        accel_z = self.lift_height * d2coeff_ds2 / (self.rise_duration ** 2)
 
         pos = np.array([self.start[0], self.start[1], self.start[2] + lift])
         vel = np.array([0.0, 0.0, vel_z])

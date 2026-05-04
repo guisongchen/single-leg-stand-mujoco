@@ -86,9 +86,10 @@ control:
   wbc_w_com: 100.0
   wbc_w_pelvis: 50.0
   wbc_w_posture: 1.0
-  wbc_w_swing: 100.0
+  wbc_w_swing: 0.0
   wbc_reg: 0.01
-  wbc_reg_lambda: 1e-6
+  wbc_reg_lambda: 0.001
+  wbc_max_contact_force: 5000.0
 
 transition:
   # Which foot becomes the support foot during single-leg stance
@@ -110,3 +111,12 @@ transition:
   # State-switch thresholds
   swing_unload_force: 20.0   # switch to single leg when swing fz drops below this (N)
   com_settle_tolerance: 0.05 # CoM must be within this distance of target before switch
+
+  # Single-leg balance tuning
+  foot_kd: 40.0              # support-foot velocity damping to prevent slip
+  pelvis_kp: 200.0           # pelvis orientation PD proportional gain
+  pelvis_kd: 20.0            # pelvis orientation PD derivative gain
+  pelvis_weight: 0.0         # QP weight for pelvis orientation task (0 = task disabled)
+  single_leg_w_com: 200.0    # boosted CoM weight during single-leg phase
+  single_leg_w_cam: 200.0    # boosted CAM weight during single-leg phase
+  single_leg_w_posture: 0.01 # reduced posture weight during single-leg phase

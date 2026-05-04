@@ -46,8 +46,16 @@ class QPWBCController:
         self.reg_lambda = float(c.get("wbc_reg_lambda", 1e-6))
 
         self.mu = float(config.get("simulation", {}).get("friction", 0.8))
-        self.foot_half_length = 0.085
-        self.foot_half_width = 0.030
+        # Foot CoP envelope in foot frame, derived from the 4 corner spheres in
+        # the G1 XML (positions: x in [-0.05, +0.12], y in [-0.025, +0.025]).
+        # The rectangle is asymmetric in x (heel only 5 cm back, toe 12 cm
+        # forward of the ankle joint), so a symmetric "half length" bound
+        # would either forbid valid CoPs near the toe or admit impossible
+        # ones behind the heel.
+        self.foot_cop_x_back = 0.05      # CoP may extend 5 cm behind ankle
+        self.foot_cop_x_forward = 0.12   # CoP may extend 12 cm forward of ankle
+        self.foot_cop_y_half = 0.025     # CoP envelope half-width
+        self.max_contact_force = float(c.get("wbc_max_contact_force", 5000.0))
 
         self._total_mass = float(env.model.body_subtreemass[0])
 
@@ -144,6 +152,7 @@ class QPWBCController:
         active_feet,          # list of {"jacobian": J, "name": str}
         bias_force,
         swing_task=None,      # optional {"jacobian": J, "accel_des": a}
+        extra_tasks=None,     # optional list of (weight, J, accel_des)
     ):
         """
         Build and solve the QP for a variable number of contact feet.
@@ -151,7 +160,7 @@ class QPWBCController:
         Parameters
         ----------
         active_feet : list[dict]
-            Each dict has keys ``jacobian`` (6 x nv) and ``name``.
+            Each dict has keys ``jacobian`` (m x nv, m=3 or 6) and ``name``.
         swing_task : dict | None
             Optional soft objective for a swing foot:
             ``{"jacobian": J, "accel_des": a_des}``.
@@ -160,13 +169,14 @@ class QPWBCController:
         -------
         qacc_des : np.ndarray
         wrenches : list[np.ndarray]
-            One 6-D wrench per active foot, in the same order as ``active_feet``.
+            One m-D wrench per active foot, in the same order as ``active_feet``.
         tau : np.ndarray
             Actuator torques (nu,).
         """
         nv = model.nv
         n_feet = len(active_feet)
-        n_lambda = n_feet * 6
+        lambda_dims = [foot["jacobian"].shape[0] for foot in active_feet]
+        n_lambda = sum(lambda_dims)
         nx = nv + n_lambda
 
         # ---- Objective -------------------------------------------------
@@ -179,6 +189,9 @@ class QPWBCController:
             tasks.append(
                 (np.sqrt(self.w_swing), swing_task["jacobian"], swing_task["accel_des"])
             )
+        if extra_tasks is not None:
+            for weight, jac, target in extra_tasks:
+                tasks.append((np.sqrt(weight), jac, target))
 
         J_tasks_weighted = np.vstack([w * J for w, J, _ in tasks])
         task_targets_weighted = np.hstack([
@@ -204,17 +217,21 @@ class QPWBCController:
         constr_fb = np.zeros((6, nx))
         constr_fb[:, :nv] = self._M[:6, :]
         for i, foot in enumerate(active_feet):
-            start = nv + i * 6
-            constr_fb[:, start:start + 6] = -foot["jacobian"][:, :6].T
+            jac = foot["jacobian"]
+            m = jac.shape[0]
+            start = nv + sum(lambda_dims[:i])
+            constr_fb[:, start:start + m] = -jac[:, :6].T
         eq_blocks.append(constr_fb)
         rhs_blocks.append(-bias_force[:6])
 
-        # Fixed-foot kinematics
+        # Fixed-foot kinematics (with optional velocity damping / offset)
         for foot in active_feet:
-            constr_foot = np.zeros((6, nx))
-            constr_foot[:, :nv] = foot["jacobian"]
+            jac = foot["jacobian"]
+            m = jac.shape[0]
+            constr_foot = np.zeros((m, nx))
+            constr_foot[:, :nv] = jac
             eq_blocks.append(constr_foot)
-            rhs_blocks.append(np.zeros(6))
+            rhs_blocks.append(foot.get("accel_offset", np.zeros(m))[:m])
 
         constr_eq = np.vstack(eq_blocks)
         lb_eq = np.hstack(rhs_blocks)
@@ -222,7 +239,7 @@ class QPWBCController:
 
         # ---- Inequality constraints ------------------------------------
         if n_lambda > 0:
-            constr_ineq, lb_ineq, ub_ineq = self._build_wrench_cones(nv, n_feet)
+            constr_ineq, lb_ineq, ub_ineq = self._build_wrench_cones(nv, active_feet)
         else:
             n_ineq = 0
             constr_ineq = np.zeros((0, nx))
@@ -255,17 +272,17 @@ class QPWBCController:
             step,
         )
 
-        # ---- Diagnostics -----------------------------------------------
-        if res.info.iter >= 1000 or res.info.status_val not in (1, 2):
-            self._print_osqp_diagnostics(
-                step=step,
-                res=res,
-                com_pos=compute_com_position(model, data),
-                constr_eq=constr_eq,
-                active_feet=active_feet,
-                nx=nx,
-                nv=nv,
-            )
+        # # ---- Diagnostics -----------------------------------------------
+        # if res.info.iter >= 1000 or res.info.status_val not in (1, 2):
+        #     self._print_osqp_diagnostics(
+        #         step=step,
+        #         res=res,
+        #         com_pos=compute_com_position(model, data),
+        #         constr_eq=constr_eq,
+        #         active_feet=active_feet,
+        #         nx=nx,
+        #         nv=nv,
+        #     )
 
         if res.info.status_val not in (1, 2):
             raise RuntimeError(f"OSQP failed at step {step}: {res.info.status}")
@@ -275,9 +292,10 @@ class QPWBCController:
 
         qacc_des = x_opt[:nv]
         wrenches = []
-        for i in range(n_feet):
-            start = nv + i * 6
-            wrenches.append(x_opt[start:start + 6])
+        start = nv
+        for m in lambda_dims:
+            wrenches.append(x_opt[start:start + m])
+            start += m
 
         # ---- Torque recovery -------------------------------------------
         tau_full = self._M @ qacc_des + bias_force
@@ -331,64 +349,104 @@ class QPWBCController:
             [-v[1], v[0], 0.0],
         ])
 
-    def _build_wrench_cones(self, nv: int, n_feet: int):
+    def _build_wrench_cones(self, nv: int, active_feet: list):
         mu = self.mu
-        Hw = self.foot_half_width
-        Hl = self.foot_half_length
-        n_ineq_per_foot = 9
-        n_ineq = n_feet * n_ineq_per_foot
-        nx = nv + n_feet * 6
+        cop_y_half = self.foot_cop_y_half
+        cop_x_back = self.foot_cop_x_back
+        cop_x_forward = self.foot_cop_x_forward
+
+        lambda_dims = [foot["jacobian"].shape[0] for foot in active_feet]
+        n_ineq = 0
+        for m in lambda_dims:
+            n_ineq += 5 if m == 3 else 9
+
+        nx = nv + sum(lambda_dims)
 
         A = np.zeros((n_ineq, nx))
         l = np.full(n_ineq, -np.inf)
         u = np.zeros(n_ineq)
 
-        for i in range(n_feet):
-            lam_start = nv + i * 6
-            fx_i = lam_start + 0
-            fy_i = lam_start + 1
-            fz_i = lam_start + 2
-            tx_i = lam_start + 3
-            ty_i = lam_start + 4
+        row = 0
+        lam_start = nv
+        for foot in active_feet:
+            m = foot["jacobian"].shape[0]
+            if m == 3:
+                fx_i = lam_start + 0
+                fy_i = lam_start + 1
+                fz_i = lam_start + 2
 
-            row = i * n_ineq_per_foot
+                A[row, fz_i] = 1.0
+                l[row] = 0.0
+                u[row] = self.max_contact_force
+                row += 1
 
-            A[row, fz_i] = 1.0
-            l[row] = 0.0
-            u[row] = np.inf
-            row += 1
+                A[row, fx_i] = 1.0
+                A[row, fz_i] = -mu
+                row += 1
 
-            A[row, fx_i] = 1.0
-            A[row, fz_i] = -mu
-            row += 1
+                A[row, fx_i] = -1.0
+                A[row, fz_i] = -mu
+                row += 1
 
-            A[row, fx_i] = -1.0
-            A[row, fz_i] = -mu
-            row += 1
+                A[row, fy_i] = 1.0
+                A[row, fz_i] = -mu
+                row += 1
 
-            A[row, fy_i] = 1.0
-            A[row, fz_i] = -mu
-            row += 1
+                A[row, fy_i] = -1.0
+                A[row, fz_i] = -mu
+                row += 1
 
-            A[row, fy_i] = -1.0
-            A[row, fz_i] = -mu
-            row += 1
+            elif m == 6:
+                fx_i = lam_start + 0
+                fy_i = lam_start + 1
+                fz_i = lam_start + 2
+                tx_i = lam_start + 3
+                ty_i = lam_start + 4
 
-            A[row, tx_i] = 1.0
-            A[row, fz_i] = -Hw
-            row += 1
+                A[row, fz_i] = 1.0
+                l[row] = 0.0
+                u[row] = self.max_contact_force
+                row += 1
 
-            A[row, tx_i] = -1.0
-            A[row, fz_i] = -Hw
-            row += 1
+                A[row, fx_i] = 1.0
+                A[row, fz_i] = -mu
+                row += 1
 
-            A[row, ty_i] = 1.0
-            A[row, fz_i] = -Hl
-            row += 1
+                A[row, fx_i] = -1.0
+                A[row, fz_i] = -mu
+                row += 1
 
-            A[row, ty_i] = -1.0
-            A[row, fz_i] = -Hl
-            row += 1
+                A[row, fy_i] = 1.0
+                A[row, fz_i] = -mu
+                row += 1
+
+                A[row, fy_i] = -1.0
+                A[row, fz_i] = -mu
+                row += 1
+
+                # CoP envelope (foot frame). World-frame torques about the
+                # foot body origin satisfy tx = cop_y * fz, ty = -cop_x * fz,
+                # so y bounds become symmetric on tx and x bounds become
+                # asymmetric on ty.
+                A[row, tx_i] = 1.0
+                A[row, fz_i] = -cop_y_half
+                row += 1
+
+                A[row, tx_i] = -1.0
+                A[row, fz_i] = -cop_y_half
+                row += 1
+
+                # ty <= cop_x_back * fz   (CoP at -cop_x_back: heel)
+                A[row, ty_i] = 1.0
+                A[row, fz_i] = -cop_x_back
+                row += 1
+
+                # ty >= -cop_x_forward * fz   (CoP at +cop_x_forward: toe)
+                A[row, ty_i] = -1.0
+                A[row, fz_i] = -cop_x_forward
+                row += 1
+
+            lam_start += m
 
         return A, l, u
 
@@ -416,8 +474,11 @@ class QPWBCController:
         print(f"  cond(constr_eq) : {np.linalg.cond(constr_eq):.2e}")
 
         if res.x is not None:
-            for i, foot in enumerate(active_feet):
-                w = res.x[nv + i * 6:nv + (i + 1) * 6]
+            start = nv
+            for foot in active_feet:
+                m = foot["jacobian"].shape[0]
+                w = res.x[start:start + m]
+                start += m
                 print(f"  {foot['name']:6s} fz={w[2]:7.2f}  |fx|/fz={abs(w[0])/(w[2]+1e-6):.3f}")
 
         from utils.kinematics import compute_contact_wrench
