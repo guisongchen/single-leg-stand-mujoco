@@ -124,6 +124,15 @@ transition:
   single_leg_w_cam: 200.0    # boosted CAM weight during single-leg phase
   single_leg_w_posture: 0.01 # reduced posture weight during single-leg phase
 
+  # Bipedal return phase (single-leg -> bipedal)
+  t_bipedal_return: 7.0      # seconds to lower swing foot and settle
+  return_com_shift_duration: 2.0  # seconds to move CoM back to midpoint
+  return_foot_kd_boost: 2.0  # multiplier on foot_kd after touchdown
+  return_touchdown_fz: 20.0  # swing foot fz threshold for touchdown (N)
+  return_settle_duration: 1.0  # seconds after touchdown before switching to hard constraints
+  return_land_kp: 100.0      # PD proportional gain for soft landing impedance
+  return_land_kd: 40.0       # PD derivative gain for soft landing impedance
+
 walking:
   step_length: 0.25          # forward distance per step (m)
   step_width: 0.20           # lateral distance between feet (m)

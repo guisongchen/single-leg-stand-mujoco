@@ -10,7 +10,7 @@ from utils.kinematics import compute_com_position, compute_com_velocity, compute
 
 class TransitionController(QPWBCController):
     """
-    State-machine controller for bipedal -> single-leg transition.
+    State-machine controller for bipedal -> single-leg -> bipedal loop.
 
     States
     ------
@@ -25,6 +25,11 @@ class TransitionController(QPWBCController):
         damping to prevent slip.  The swing foot is tracked as a soft
         objective.  A pelvis-orientation task keeps the torso upright.
         Posture weight is reduced so the robot can adopt the natural lean.
+    BIPEDAL_RETURN :
+        Both feet return to the ground.  CoM is shifted back to the midpoint
+        of both feet.  Foot damping is boosted after touchdown to kill
+        landing oscillation.  Posture weight stays low until the robot is
+        fully settled.
     """
 
     def __init__(self, env: G1Env, config: dict):
@@ -63,6 +68,17 @@ class TransitionController(QPWBCController):
         self.single_leg_w_cam = float(tcfg.get("single_leg_w_cam", 200.0))
         self.single_leg_w_posture = float(tcfg.get("single_leg_w_posture", 0.01))
 
+        # Bipedal return phase
+        self.t_bipedal_return = float(tcfg.get("t_bipedal_return", 7.0))
+        self.return_com_shift_duration = float(
+            tcfg.get("return_com_shift_duration", 2.0)
+        )
+        self.return_foot_kd_boost = float(tcfg.get("return_foot_kd_boost", 2.0))
+        self.return_touchdown_fz = float(tcfg.get("return_touchdown_fz", 20.0))
+        self.return_settle_duration = float(tcfg.get("return_settle_duration", 1.0))
+        self.return_land_kp = float(tcfg.get("return_land_kp", 100.0))
+        self.return_land_kd = float(tcfg.get("return_land_kd", 40.0))
+
         self._support_bid = env._body_ids[f"{self.support_foot_name}_foot"]
         self._swing_bid = env._body_ids[f"{self.swing_foot_name}_foot"]
         self._pelvis_bid = env._body_ids["pelvis"]
@@ -75,6 +91,12 @@ class TransitionController(QPWBCController):
         self.com_planner = None
         self.swing_foot_planner = None
         self.swing_foot_start = None
+        self.q_ref_bipedal = None  # standing pose, saved in reset()
+
+        # Bipedal return planners (created on entry to BIPEDAL_RETURN)
+        self.com_planner_return = None
+        self.swing_foot_planner_return = None
+        self._return_touchdown = False
 
         # Capture-point switching logic
         self.cp_margin = float(tcfg.get("cp_margin", 0.02))
@@ -85,6 +107,7 @@ class TransitionController(QPWBCController):
         data = self.env.data
 
         self.q_ref = self.env.get_actuated_qpos().copy()
+        self.q_ref_bipedal = self.q_ref.copy()
         self.com_start = compute_com_position(model, data)
 
         support_pos = self.env.get_body_pos(f"{self.support_foot_name}_foot")
@@ -195,6 +218,50 @@ class TransitionController(QPWBCController):
         tau_origin = tau_com + np.cross(r_com_body, force)
         return np.hstack([force, tau_origin])
 
+    def _setup_bipedal_return(self) -> None:
+        """Initialise planners for the BIPEDAL_RETURN phase."""
+        model = self.env.model
+        data = self.env.data
+
+        # CoM target: midpoint of both feet, keep current height
+        left_pos = self.env.get_body_pos("left_foot")
+        right_pos = self.env.get_body_pos("right_foot")
+        com_mid = 0.5 * (left_pos + right_pos)
+        com_now = compute_com_position(model, data)
+        com_mid[2] = com_now[2]
+
+        # CoM planner starts immediately: shift toward the midpoint so the
+        # body straightens and the swing leg can reach the ground BEFORE
+        # touchdown.  Keeping CoM over the support foot locks the geometry
+        # and the foot hovers indefinitely.
+        com_now = compute_com_position(model, data)
+        left_pos = self.env.get_body_pos("left_foot")
+        right_pos = self.env.get_body_pos("right_foot")
+        com_mid = 0.5 * (left_pos + right_pos)
+        com_mid[2] = com_now[2]
+        self.com_planner_return = ComPlanner(
+            com_now,
+            com_mid,
+            self.return_com_shift_duration,
+        )
+        self._return_settle_start_time = None
+
+        # Restore the bipedal standing reference so the posture task helps
+        # retract the swing leg instead of fighting the descent.
+        if self.q_ref_bipedal is not None:
+            self.q_ref = self.q_ref_bipedal.copy()
+
+        # Swing foot target: actively descend from current height to ground.
+        swing_pos = self.env.get_body_pos(f"{self.swing_foot_name}_foot")
+        descent = swing_pos[2] - self._support_foot_ground_z
+        self.swing_foot_planner_return = SwingFootPlanner(
+            swing_pos.copy(),
+            lift_height=-descent,
+            rise_duration=1.0,
+        )
+
+        self._return_touchdown = False
+
     def compute(self) -> np.ndarray:
         model = self.env.model
         data = self.env.data
@@ -234,6 +301,18 @@ class TransitionController(QPWBCController):
                 self.q_ref = self.env.get_actuated_qpos().copy()
                 dt_phase = 0.0
 
+        elif self._state == "SINGLE_LEG" and dt_phase >= self.t_single_leg:
+            self._state = "BIPEDAL_RETURN"
+            self._phase_start_time = t
+            self._setup_bipedal_return()
+            dt_phase = 0.0
+
+        elif self._state == "BIPEDAL_RETURN" and dt_phase >= self.t_bipedal_return:
+            self._state = "BIPEDAL"
+            self._phase_start_time = t
+            self.com_start = compute_com_position(model, data)
+            dt_phase = 0.0
+
         # ---- Common kinematics & dynamics ------------------------------
         q = self.env.get_actuated_qpos()
         dq = self.env.get_actuated_qvel()
@@ -257,11 +336,22 @@ class TransitionController(QPWBCController):
 
         # ---- CoM target ------------------------------------------------
         if self._state == "BIPEDAL":
-            com_target = self.com_start
+            # Use the current foot midpoint so the CoM target adapts to
+            # foot drift during single-leg.  Frozen com_start becomes
+            # suboptimal once the feet have moved.
+            left_pos = self.env.get_body_pos("left_foot")
+            right_pos = self.env.get_body_pos("right_foot")
+            com_mid = 0.5 * (left_pos + right_pos)
+            com_mid[2] = self.com_start[2]
+            com_target = com_mid
         elif self._state == "WEIGHT_SHIFT":
             com_target, _, _ = self.com_planner.evaluate(dt_phase)
+        elif self._state == "BIPEDAL_RETURN":
+            com_target, _, _ = self.com_planner_return.evaluate(dt_phase)
         else:  # SINGLE_LEG
             com_target = self.com_target_single
+
+        self.com_target = com_target  # expose for diagnostics
 
         # ---- Task targets ----------------------------------------------
         com_accel_des, cam_rate_des, joint_accel_des, J_cam = self._compute_task_targets(
@@ -273,9 +363,21 @@ class TransitionController(QPWBCController):
         extra_tasks = None
 
         if self._state == "BIPEDAL":
+            # Velocity damping prevents foot slip that was causing
+            # ill-conditioned Jacobians after returning from single-leg.
+            support_vel = J_support @ data.qvel
+            swing_vel = J_swing @ data.qvel
             active_feet = [
-                {"jacobian": J_support, "name": f"{self.support_foot_name}_foot"},
-                {"jacobian": J_swing, "name": f"{self.swing_foot_name}_foot"},
+                {
+                    "jacobian": J_support,
+                    "name": f"{self.support_foot_name}_foot",
+                    "accel_offset": -self.foot_kd * support_vel,
+                },
+                {
+                    "jacobian": J_swing,
+                    "name": f"{self.swing_foot_name}_foot",
+                    "accel_offset": -self.foot_kd * swing_vel,
+                },
             ]
         elif self._state == "WEIGHT_SHIFT":
             # Both feet stay in the QP, but the swing foot gets a gentle
@@ -293,6 +395,102 @@ class TransitionController(QPWBCController):
                     "accel_offset": np.array([0.0, 0.0, a_lift, 0.0, 0.0, 0.0]),
                 },
             ]
+        elif self._state == "BIPEDAL_RETURN":
+            # Detect touchdown (force-only).
+            if not self._return_touchdown:
+                swing_fz_now = self._swing_fz()
+                if swing_fz_now > self.return_touchdown_fz:
+                    self._return_touchdown = True
+                    self._return_settle_start_time = t
+
+            support_vel = J_support @ data.qvel
+
+            if not self._return_touchdown:
+                # PRE-TOUCHDOWN: support hard, swing soft descent.
+                active_feet = [
+                    {
+                        "jacobian": J_support,
+                        "name": f"{self.support_foot_name}_foot",
+                        "accel_offset": -self.foot_kd * support_vel,
+                    },
+                ]
+                swing_pos, swing_vel_traj, swing_accel = (
+                    self.swing_foot_planner_return.evaluate(dt_phase)
+                )
+                current_swing_pos = self.env.get_body_pos(
+                    f"{self.swing_foot_name}_foot"
+                )
+                current_swing_vel = J_swing[:3] @ data.qvel
+                swing_accel_des_z = (
+                    swing_accel[2]
+                    + self.swing_kp * (swing_pos[2] - current_swing_pos[2])
+                    + self.swing_kd * (swing_vel_traj[2] - current_swing_vel[2])
+                )
+                swing_task = {
+                    "jacobian": J_swing[2:3],
+                    "accel_des": np.array([swing_accel_des_z]),
+                }
+
+            else:
+                dt_since_touchdown = t - self._return_settle_start_time
+                if dt_since_touchdown >= self.return_settle_duration:
+                    # SHIFT PHASE: both feet hard, boosted damping.
+                    foot_kd_eff = self.foot_kd * self.return_foot_kd_boost
+                    swing_vel = J_swing @ data.qvel
+                    active_feet = [
+                        {
+                            "jacobian": J_support,
+                            "name": f"{self.support_foot_name}_foot",
+                            "accel_offset": -foot_kd_eff * support_vel,
+                        },
+                        {
+                            "jacobian": J_swing,
+                            "name": f"{self.swing_foot_name}_foot",
+                            "accel_offset": -foot_kd_eff * swing_vel,
+                        },
+                    ]
+                else:
+                    # SETTLE PHASE: support hard, swing soft impedance at
+                    # ground height while CoM continues shifting.
+                    active_feet = [
+                        {
+                            "jacobian": J_support,
+                            "name": f"{self.support_foot_name}_foot",
+                            "accel_offset": -self.foot_kd * support_vel,
+                        },
+                    ]
+                    current_swing_pos = self.env.get_body_pos(
+                        f"{self.swing_foot_name}_foot"
+                    )
+                    current_swing_vel = J_swing[:3] @ data.qvel
+                    swing_accel_des_z = (
+                        -self.return_land_kp
+                        * (current_swing_pos[2] - self._support_foot_ground_z)
+                        - self.return_land_kd * current_swing_vel[2]
+                    )
+                    swing_task = {
+                        "jacobian": J_swing[2:3],
+                        "accel_des": np.array([swing_accel_des_z]),
+                    }
+
+            # Pelvis orientation (used both before and after touchdown)
+            pelvis_quat_des = np.array([1.0, 0.0, 0.0, 0.0])
+            pelvis_quat_cur = self.env.get_pelvis_quat()
+            pelvis_ang_err = self._quat_error(pelvis_quat_des, pelvis_quat_cur)
+            J_pelvis_lin = np.zeros((3, nv))
+            J_pelvis_ang = np.zeros((3, nv))
+            mujoco.mj_jacBody(
+                model, data, J_pelvis_lin, J_pelvis_ang, self._pelvis_bid
+            )
+            pelvis_omega = J_pelvis_ang @ data.qvel
+            pelvis_accel_des = (
+                -self.pelvis_kp * pelvis_ang_err
+                - self.pelvis_kd * pelvis_omega
+            )
+            extra_tasks = [
+                (self.pelvis_weight, J_pelvis_ang, pelvis_accel_des),
+            ]
+
         else:  # SINGLE_LEG
             support_contact_fz = self._support_fz()
 
@@ -386,7 +584,8 @@ class TransitionController(QPWBCController):
                     )
                 )
 
-        # ---- Temporarily boost single-leg task weights -----------------
+        # ---- Temporarily boost single-leg / return task weights --------
+        old_w_com = old_w_cam = old_w_posture = old_w_swing = None
         if self._state == "SINGLE_LEG":
             old_w_com = self.w_com
             old_w_cam = self.w_cam
@@ -394,8 +593,16 @@ class TransitionController(QPWBCController):
             self.w_com = self.single_leg_w_com
             self.w_cam = self.single_leg_w_cam
             self.w_posture = self.single_leg_w_posture
-        else:
-            old_w_com = old_w_cam = old_w_posture = None
+        elif self._state == "BIPEDAL_RETURN" and not self._return_touchdown:
+            # Before touchdown: strong balance + strong descent + moderate posture
+            old_w_com = self.w_com
+            old_w_cam = self.w_cam
+            old_w_posture = self.w_posture
+            old_w_swing = self.w_swing
+            self.w_com = self.single_leg_w_com
+            self.w_cam = self.single_leg_w_cam
+            self.w_posture = 5.0          # help pull back to standing pose
+            self.w_swing = 500.0          # strong authority for foot descent
 
         qacc_des, wrenches, tau = self._solve_qp(
             model=model,
@@ -412,10 +619,14 @@ class TransitionController(QPWBCController):
         )
 
         # Restore weights
-        if self._state == "SINGLE_LEG":
+        if old_w_com is not None:
             self.w_com = old_w_com
+        if old_w_cam is not None:
             self.w_cam = old_w_cam
+        if old_w_posture is not None:
             self.w_posture = old_w_posture
+        if old_w_swing is not None:
+            self.w_swing = old_w_swing
 
         return tau
 
