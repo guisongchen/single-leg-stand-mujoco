@@ -112,6 +112,8 @@ transition:
   # State-switch thresholds
   swing_unload_force: 20.0   # switch to single leg when swing fz drops below this (N)
   com_settle_tolerance: 0.05 # CoM must be within this distance of target before switch
+  cp_margin: 0.02           # inward margin on support rectangle for capture point (m)
+  weight_shift_timeout: 15.0 # max time in WEIGHT_SHIFT before forced switch (s)
 
   # Single-leg balance tuning
   foot_kd: 40.0              # support-foot velocity damping to prevent slip

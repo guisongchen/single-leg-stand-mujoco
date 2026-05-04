@@ -5,7 +5,7 @@ from env import G1Env
 from controllers.base_qp_wbc import QPWBCController
 from planners.com_planner import ComPlanner
 from planners.swing_foot_planner import SwingFootPlanner
-from utils.kinematics import compute_com_position, compute_contact_wrench, euler_from_quat
+from utils.kinematics import compute_com_position, compute_com_velocity, compute_contact_wrench, euler_from_quat
 
 
 class TransitionController(QPWBCController):
@@ -76,6 +76,10 @@ class TransitionController(QPWBCController):
         self.swing_foot_planner = None
         self.swing_foot_start = None
 
+        # Capture-point switching logic
+        self.cp_margin = float(tcfg.get("cp_margin", 0.02))
+        self.weight_shift_timeout = float(tcfg.get("weight_shift_timeout", 15.0))
+
     def reset(self) -> None:
         model = self.env.model
         data = self.env.data
@@ -119,6 +123,52 @@ class TransitionController(QPWBCController):
 
         self._state = "BIPEDAL"
         self._phase_start_time = 0.0
+
+    def _compute_capture_point(self, com_pos: np.ndarray, com_vel: np.ndarray) -> np.ndarray:
+        """Instantaneous capture point in world XY plane.
+
+        CP = com_xy + com_vxy / omega, where omega = sqrt(g / com_z).
+        If the CP lies inside the support foot polygon, the robot can
+        theoretically recover to rest without taking a step.
+        """
+        g = abs(self.env.model.opt.gravity[2])
+        z_com = max(com_pos[2], 0.1)  # guard against div-by-zero
+        omega = np.sqrt(g / z_com)
+        return com_pos[:2] + com_vel[:2] / omega
+
+    def _is_cp_inside_support(self, cp: np.ndarray) -> bool:
+        """Check whether the capture point is inside the support foot rectangle."""
+        support_pos = self.env.get_body_pos(f"{self.support_foot_name}_foot")
+        support_R = self.env.data.xmat[self._support_bid].reshape(3, 3)
+        cp_local = support_R.T @ np.append(cp - support_pos[:2], 0.0)
+        margin = self.cp_margin
+        return (
+            -self.foot_cop_x_back + margin <= cp_local[0] <= self.foot_cop_x_forward - margin
+            and -self.foot_cop_y_half + margin <= cp_local[1] <= self.foot_cop_y_half - margin
+        )
+
+    def _is_cp_inside_combined_polygon(self, cp: np.ndarray) -> bool:
+        """Check whether CP is inside the combined support polygon of both feet.
+
+        During WEIGHT_SHIFT both feet are still on the ground; the relevant
+        stability region is the convex hull of both contact rectangles.
+        """
+        left_pos = self.env.get_body_pos("left_foot")
+        right_pos = self.env.get_body_pos("right_foot")
+        left_R = self.env.data.xmat[self._left_bid].reshape(3, 3)
+        right_R = self.env.data.xmat[self._right_bid].reshape(3, 3)
+
+        # Transform CP into each foot frame
+        cp_left = left_R.T @ np.append(cp - left_pos[:2], 0.0)
+        cp_right = right_R.T @ np.append(cp - right_pos[:2], 0.0)
+
+        def _inside_foot(cp_local):
+            return (
+                -self.foot_cop_x_back <= cp_local[0] <= self.foot_cop_x_forward
+                and -self.foot_cop_y_half <= cp_local[1] <= self.foot_cop_y_half
+            )
+
+        return _inside_foot(cp_left) or _inside_foot(cp_right)
 
     def _swing_fz(self) -> float:
         """MuJoCo contact force on the swing foot (vertical, world frame)."""
@@ -175,13 +225,25 @@ class TransitionController(QPWBCController):
 
         elif self._state == "WEIGHT_SHIFT":
             com_now = compute_com_position(model, data)
+            com_vel = compute_com_velocity(model, data)
             com_err = np.linalg.norm(com_now[:2] - self.com_target_single[:2])
             swing_fz = self._swing_fz()
+
+            # Capture-point safety gate: CP must be inside the *combined*
+            # support polygon of both feet.  During weight shift the robot
+            # is still on two feet; checking against the support foot alone
+            # would block the natural handoff because the CP often sits near
+            # the edge of the support foot while the swing foot is still
+            # contributing.
+            cp = self._compute_capture_point(com_now, com_vel)
+            cp_safe = self._is_cp_inside_combined_polygon(cp)
+
             ready = (
                 swing_fz < self.swing_unload_force
                 and com_err < self.com_settle_tolerance
+                and cp_safe
             )
-            if ready or dt_phase >= 5.0:
+            if ready or dt_phase >= self.weight_shift_timeout:
                 self._state = "SINGLE_LEG"
                 self._phase_start_time = t
                 self.q_ref = self.env.get_actuated_qpos().copy()
