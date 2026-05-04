@@ -123,3 +123,12 @@ transition:
   single_leg_w_com: 200.0    # boosted CoM weight during single-leg phase
   single_leg_w_cam: 200.0    # boosted CAM weight during single-leg phase
   single_leg_w_posture: 0.01 # reduced posture weight during single-leg phase
+
+walking:
+  step_length: 0.25          # forward distance per step (m)
+  step_width: 0.20           # lateral distance between feet (m)
+  step_height: 0.05          # swing foot clearance above ground (m)
+  single_support_duration: 0.60   # seconds per single-support phase
+  double_support_duration: 0.15   # seconds per double-support phase
+  init_duration: 1.0         # seconds in INIT before first step
+  forward_direction: [1.0, 0.0, 0.0]  # world-frame walking direction
