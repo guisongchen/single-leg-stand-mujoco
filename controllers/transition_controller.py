@@ -317,7 +317,7 @@ class TransitionController(QPWBCController):
             pelvis_omega = J_pelvis_ang @ data.qvel
 
             pelvis_accel_des = (
-                self.pelvis_kp * pelvis_ang_err
+                -self.pelvis_kp * pelvis_ang_err
                 - self.pelvis_kd * pelvis_omega
             )
 

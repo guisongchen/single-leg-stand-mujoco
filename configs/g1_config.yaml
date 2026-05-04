@@ -98,7 +98,7 @@ transition:
   # Phase timings (seconds)
   t_bipedal: 1.0         # Hold stable bipedal stance before shifting
   t_weight_shift: 2.5    # Move CoM over support foot
-  t_single_leg: 3.0      # Minimum single-leg hold time
+  t_single_leg: 8.0      # Minimum single-leg hold time
 
   # Swing foot trajectory
   swing_lift_height: 0.03    # metres above ground (low = less disturbance)
@@ -114,9 +114,9 @@ transition:
 
   # Single-leg balance tuning
   foot_kd: 40.0              # support-foot velocity damping to prevent slip
-  pelvis_kp: 200.0           # pelvis orientation PD proportional gain
-  pelvis_kd: 20.0            # pelvis orientation PD derivative gain
-  pelvis_weight: 0.0         # QP weight for pelvis orientation task (0 = task disabled)
+  pelvis_kp: 30.0            # pelvis orientation PD proportional gain
+  pelvis_kd: 5.0             # pelvis orientation PD derivative gain
+  pelvis_weight: 5.0         # QP weight for pelvis orientation task
   single_leg_w_com: 200.0    # boosted CoM weight during single-leg phase
   single_leg_w_cam: 200.0    # boosted CAM weight during single-leg phase
   single_leg_w_posture: 0.01 # reduced posture weight during single-leg phase
