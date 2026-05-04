@@ -195,21 +195,6 @@ class TransitionController(QPWBCController):
         tau_origin = tau_com + np.cross(r_com_body, force)
         return np.hstack([force, tau_origin])
 
-    @staticmethod
-    def _quat_error(q_des: np.ndarray, q_cur: np.ndarray) -> np.ndarray:
-        qw, qx, qy, qz = q_cur
-        dot = qw * q_des[0] + qx * q_des[1] + qy * q_des[2] + qz * q_des[3]
-        if dot < 0.0:
-            qw, qx, qy, qz = -qw, -qx, -qy, -qz
-        w0, x0, y0, z0 = q_des
-        w_err = w0 * qw + x0 * qx + y0 * qy + z0 * qz
-        x_err = w0 * qx - x0 * qw - y0 * qz + z0 * qy
-        y_err = w0 * qy + x0 * qz - y0 * qw - z0 * qx
-        z_err = w0 * qz - x0 * qy + y0 * qx - z0 * qw
-        w_err = np.clip(w_err, -1.0, 1.0)
-        scale = 2.0 if w_err >= 0 else -2.0
-        return np.array([scale * x_err, scale * y_err, scale * z_err])
-
     def compute(self) -> np.ndarray:
         model = self.env.model
         data = self.env.data

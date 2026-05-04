@@ -71,6 +71,7 @@ class WalkingController(QPWBCController):
         self._swing_target: np.ndarray | None = None
         self._support_foot_name: str | None = None
         self._swing_foot_name: str | None = None
+        self._next_swing_is_left: bool = True
 
     def reset(self) -> None:
         model = self.env.model
@@ -96,6 +97,7 @@ class WalkingController(QPWBCController):
         self._phase_start_time = 0.0
         self._step_count = 0
         self._total_displacement = 0.0
+        self._next_swing_is_left = True
 
         self.swing_planner = None
         self.com_planner = None
@@ -114,13 +116,16 @@ class WalkingController(QPWBCController):
         dt_phase = t - self._phase_start_time
 
         if self._state == "INIT" and dt_phase >= self.init_duration:
-            self._enter_left_swing(t)
+            self._enter_double_support(t)
 
         elif self._state == "LEFT_SWING" and dt_phase >= self.single_support_duration:
             self._enter_double_support(t)
 
         elif self._state == "DOUBLE_SUPPORT" and dt_phase >= self.double_support_duration:
-            self._enter_right_swing(t)
+            if self._next_swing_is_left:
+                self._enter_left_swing(t)
+            else:
+                self._enter_right_swing(t)
 
         elif self._state == "RIGHT_SWING" and dt_phase >= self.single_support_duration:
             self._enter_double_support(t)
@@ -130,6 +135,7 @@ class WalkingController(QPWBCController):
         self._phase_start_time = t
         self._support_foot_name = "right"
         self._swing_foot_name = "left"
+        self._next_swing_is_left = False
         self._setup_swing_phase()
 
     def _enter_right_swing(self, t: float) -> None:
@@ -137,6 +143,7 @@ class WalkingController(QPWBCController):
         self._phase_start_time = t
         self._support_foot_name = "left"
         self._swing_foot_name = "right"
+        self._next_swing_is_left = True
         self._setup_swing_phase()
 
     def _enter_double_support(self, t: float) -> None:
@@ -235,9 +242,19 @@ class WalkingController(QPWBCController):
             ]
 
         elif self._state == "DOUBLE_SUPPORT":
+            # 6-D constraints with velocity damping on both feet.
+            foot_kd = self.cfg["transition"]["foot_kd"]
             active_feet = [
-                {"jacobian": J_left, "name": "left_foot"},
-                {"jacobian": J_right, "name": "right_foot"},
+                {
+                    "jacobian": J_left,
+                    "name": "left_foot",
+                    "accel_offset": -foot_kd * (J_left @ data.qvel),
+                },
+                {
+                    "jacobian": J_right,
+                    "name": "right_foot",
+                    "accel_offset": -foot_kd * (J_right @ data.qvel),
+                },
             ]
 
         elif self._state in ("LEFT_SWING", "RIGHT_SWING"):
