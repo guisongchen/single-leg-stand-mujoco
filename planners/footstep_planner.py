@@ -1,14 +1,14 @@
 """Fixed-schedule foot placement planner for periodic walking.
 
-Generates a sequence of swing-foot target positions in world frame,
-given a support foot position, step length, and step width.
+Generates swing-foot target positions in world frame,
+given a support foot position, pelvis heading, step length, and step width.
 """
 import numpy as np
 
 
 class FootstepPlanner:
     """
-    Simple fixed-schedule footstep planner.
+    Simple fixed-schedule footstep planner with heading correction.
 
     Parameters
     ----------
@@ -16,61 +16,51 @@ class FootstepPlanner:
         Forward distance per step (m).
     step_width : float
         Lateral distance between feet (m).
-    forward_direction : np.ndarray
-        Unit vector in world frame indicating walking direction.
     """
 
     def __init__(
         self,
         step_length: float,
         step_width: float,
-        forward_direction: np.ndarray | None = None,
     ):
         self.step_length = float(step_length)
         self.step_width = float(step_width)
-        self.forward_direction = (
-            np.array(forward_direction)
-            if forward_direction is not None
-            else np.array([1.0, 0.0, 0.0])
-        )
-        self.forward_direction = self.forward_direction / np.linalg.norm(
-            self.forward_direction
-        )
 
     def plan_step(
         self,
         support_foot_pos: np.ndarray,
-        is_left_swing: bool,
+        pelvis_yaw: float,
+        is_right_swing: bool,
     ) -> np.ndarray:
         """
-        Compute swing foot target position in world frame.
+        Compute swing foot target position in world frame with heading correction.
 
-        The target is placed ``step_length`` forward of the support foot,
-        offset laterally by ``step_width / 2`` in the direction of the
-        swing foot.
+        Uses absolute lateral positions (not offset from support foot):
+        left_foot_y = +step_width / 2, right_foot_y = -step_width / 2.
+
+        The step direction is rotated by pelvis_yaw to prevent diagonal walking.
 
         Parameters
         ----------
         support_foot_pos : np.ndarray
             Current support foot position [x, y, z] in world frame.
-        is_left_swing : bool
-            True if the left foot is the swing foot (i.e. right foot is
-            the current support foot).
+        pelvis_yaw : float
+            Current pelvis yaw angle (rad) in world frame.
+        is_right_swing : bool
+            True if the right foot is the swing foot (i.e. left foot is support).
 
         Returns
         -------
         target : np.ndarray
-            Swing foot target [x, y, z] in world frame.  z is preserved
-            from ``support_foot_pos``.
+            Swing foot target [x, y, z] in world frame.  z is set to ground_z
+            from support_foot_pos.
         """
-        lateral = np.cross(self.forward_direction, np.array([0.0, 0.0, 1.0]))
-        lateral = lateral / np.linalg.norm(lateral)
+        left_foot_y = self.step_width / 2.0
+        right_foot_y = -self.step_width / 2.0
 
-        sign = 1.0 if is_left_swing else -1.0
-        target = (
-            support_foot_pos
-            + self.step_length * self.forward_direction
-            + sign * (self.step_width / 2.0) * lateral
-        )
-        target[2] = support_foot_pos[2]
-        return target
+        step_dir = np.array([np.cos(pelvis_yaw), np.sin(pelvis_yaw), 0.0])
+
+        target_x = support_foot_pos[0] + step_dir[0] * self.step_length
+        target_y = right_foot_y if is_right_swing else left_foot_y
+
+        return np.array([target_x, target_y, support_foot_pos[2]])

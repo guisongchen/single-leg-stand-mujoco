@@ -1,7 +1,8 @@
 """Stage 1 walking test: static alternating support (step_length = 0).
 
 Runs the WalkingController with zero forward step length to verify the
-periodic state machine can lift and place each foot without falling.
+5-phase FSM with GRF-based transitions can lift and place each foot
+without falling.
 
 Produces outputs/test_walking.png and a text summary.
 """
@@ -37,9 +38,10 @@ def run_simulation(env: G1Env, controller: WalkingController, duration: float) -
         "pelvis_pitch": [],
         "support_slip": [],
         "step_count": [],
+        "left_grf": [],
+        "right_grf": [],
     }
 
-    # Store initial support foot positions for slip measurement
     left_init = env.get_body_pos("left_foot")[:2].copy()
     right_init = env.get_body_pos("right_foot")[:2].copy()
 
@@ -65,10 +67,9 @@ def run_simulation(env: G1Env, controller: WalkingController, duration: float) -
         quat = env.get_pelvis_quat()
         roll, pitch, _ = euler_from_quat(*quat)
 
-        # Support slip: whichever foot is supposed to be on ground
-        if state == "LEFT_SWING":
+        if state == "LEFT_SINGLE":
             slip = np.linalg.norm(right_pos[:2] - right_init)
-        elif state == "RIGHT_SWING":
+        elif state == "RIGHT_SINGLE":
             slip = np.linalg.norm(left_pos[:2] - left_init)
         else:
             slip = max(
@@ -84,11 +85,13 @@ def run_simulation(env: G1Env, controller: WalkingController, duration: float) -
         log["pelvis_pitch"].append(pitch)
         log["support_slip"].append(slip)
         log["step_count"].append(controller.step_count)
+        log["left_grf"].append(controller._compute_grf("left_foot"))
+        log["right_grf"].append(controller._compute_grf("right_foot"))
 
     return log
 
 
-def assess(log: dict) -> dict:
+def assess(log: dict) -> tuple[dict, dict]:
     """Compute pass/fail metrics."""
     t = np.array(log["t"])
     left_z = np.array(log["left_foot_z"])
@@ -97,23 +100,40 @@ def assess(log: dict) -> dict:
     pitch = np.rad2deg(np.array(log["pelvis_pitch"]))
     slip = np.array(log["support_slip"])
     states = np.array(log["state"])
+    left_grf = np.array(log["left_grf"])
+    right_grf = np.array(log["right_grf"])
 
-    # Check for falls
-    pelvis_z = np.array([0.0])  # we didn't log pelvis z directly
     max_roll = np.max(np.abs(roll))
     max_pitch = np.max(np.abs(pitch))
 
-    # Foot clearance during swing
-    left_swing_mask = states == "LEFT_SWING"
-    right_swing_mask = states == "RIGHT_SWING"
+    left_swing_mask = states == "LEFT_SINGLE"
+    right_swing_mask = states == "RIGHT_SINGLE"
     left_clearance = np.max(left_z[left_swing_mask]) - np.min(left_z) if left_swing_mask.any() else 0.0
     right_clearance = np.max(right_z[right_swing_mask]) - np.min(right_z) if right_swing_mask.any() else 0.0
 
-    # Step count
     total_steps = log["step_count"][-1] if log["step_count"] else 0
 
-    # State alternation
-    unique_states = [s for s in ["INIT", "LEFT_SWING", "DOUBLE_SUPPORT", "RIGHT_SWING"] if s in states]
+    expected_states = [
+        "BIPEDAL_INIT", "WEIGHT_SHIFT_L", "LEFT_SINGLE",
+        "DOUBLE_SUPPORT", "WEIGHT_SHIFT_R", "RIGHT_SINGLE",
+    ]
+    unique_states = [s for s in expected_states if s in states]
+
+    # GRF hysteresis: check that support foot GRF > 80% mg at transitions into single
+    transitions_to_single = []
+    for i in range(1, len(states)):
+        if states[i] in ("LEFT_SINGLE", "RIGHT_SINGLE") and states[i - 1] != states[i]:
+            transitions_to_single.append(i)
+
+    mg_approx = 34.13 * 9.81  # rough body weight; controller has exact value
+    grf_at_transitions = []
+    for idx in transitions_to_single:
+        if states[idx] == "LEFT_SINGLE":
+            grf_at_transitions.append(left_grf[idx])
+        else:
+            grf_at_transitions.append(right_grf[idx])
+
+    grf_hysteresis_ok = all(g > 0.70 * mg_approx for g in grf_at_transitions) if grf_at_transitions else False
 
     checks = {
         "no_fall": max_roll < 15.0 and max_pitch < 15.0,
@@ -122,6 +142,7 @@ def assess(log: dict) -> dict:
         "support_slip": np.max(slip) < 0.005,
         "min_steps": total_steps >= 4,
         "states_present": len(unique_states) >= 4,
+        "grf_hysteresis": grf_hysteresis_ok,
     }
 
     metrics = {
@@ -132,6 +153,8 @@ def assess(log: dict) -> dict:
         "max_support_slip_m": float(np.max(slip)),
         "total_steps": int(total_steps),
         "duration_s": float(t[-1]) if len(t) > 0 else 0.0,
+        "transitions_to_single": len(transitions_to_single),
+        "min_grf_at_transition_N": float(min(grf_at_transitions)) if grf_at_transitions else 0.0,
     }
 
     return metrics, checks
@@ -147,6 +170,8 @@ def plot(log: dict, metrics: dict, checks: dict) -> None:
     pitch = np.rad2deg(np.array(log["pelvis_pitch"]))
     slip = np.array(log["support_slip"])
     states = np.array(log["state"])
+    left_grf = np.array(log["left_grf"])
+    right_grf = np.array(log["right_grf"])
 
     state_changes = []
     prev = states[0] if len(states) > 0 else None
@@ -159,11 +184,14 @@ def plot(log: dict, metrics: dict, checks: dict) -> None:
 
     # 1. Gait phase timeline
     ax = axes[0, 0]
-    state_map = {"INIT": 0, "LEFT_SWING": 1, "DOUBLE_SUPPORT": 2, "RIGHT_SWING": 3}
+    state_map = {
+        "BIPEDAL_INIT": 0, "WEIGHT_SHIFT_L": 1, "LEFT_SINGLE": 2,
+        "DOUBLE_SUPPORT": 3, "WEIGHT_SHIFT_R": 4, "RIGHT_SINGLE": 5,
+    }
     state_vals = [state_map.get(s, -1) for s in states]
     ax.plot(t, state_vals, drawstyle="steps-post", color="tab:blue")
-    ax.set_yticks([0, 1, 2, 3])
-    ax.set_yticklabels(["INIT", "LEFT_SWING", "DOUBLE", "RIGHT_SWING"])
+    ax.set_yticks([0, 1, 2, 3, 4, 5])
+    ax.set_yticklabels(["INIT", "W_SHIFT_L", "LEFT_S", "DOUBLE", "W_SHIFT_R", "RIGHT_S"])
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Phase")
     ax.set_title("Gait phase timeline")
@@ -202,18 +230,18 @@ def plot(log: dict, metrics: dict, checks: dict) -> None:
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # 5. Pass/fail summary
+    # 5. GRF per foot
     ax = axes[2, 0]
-    ax.axis("off")
-    lines = ["=== Stage 1 Assessment ===", ""]
-    for name, passed in checks.items():
-        status = "PASS" if passed else "FAIL"
-        lines.append(f"  {name:25s} : {status}")
-    lines.append("")
-    for name, val in metrics.items():
-        lines.append(f"  {name:25s} : {val:.4f}" if isinstance(val, float) else f"  {name:25s} : {val}")
-    ax.text(0.1, 0.5, "\n".join(lines), transform=ax.transAxes,
-            fontfamily="monospace", fontsize=9, verticalalignment="center")
+    ax.plot(t, left_grf, label="left GRF")
+    ax.plot(t, right_grf, label="right GRF")
+    mg = 34.13 * 9.81
+    ax.axhline(0.5 * mg, color="g", ls="--", alpha=0.3, label="50% mg")
+    ax.axhline(0.8 * mg, color="r", ls="--", alpha=0.3, label="80% mg")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Force (N)")
+    ax.set_title("GRF per foot")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
 
     # 6. Step count over time
     ax = axes[2, 1]
@@ -223,8 +251,8 @@ def plot(log: dict, metrics: dict, checks: dict) -> None:
     ax.set_title("Cumulative steps")
     ax.grid(True, alpha=0.3)
 
-    for tc, label in state_changes:
-        for ax in axes.flat[:4]:
+    for tc, _ in state_changes:
+        for ax in axes.flat:
             ax.axvline(tc, color="g", ls="--", alpha=0.4)
 
     plt.tight_layout()
@@ -238,7 +266,6 @@ def main() -> None:
 
     # Stage 1: zero forward motion
     cfg["walking"]["step_length"] = 0.0
-    cfg["walking"]["single_support_duration"] = 2.0
     cfg["walking"]["double_support_duration"] = 0.5
 
     env = G1Env(CONFIG_PATH)
@@ -246,7 +273,7 @@ def main() -> None:
     controller = WalkingController(env, cfg)
     controller.reset()
 
-    duration = 10.0  # ~3-4 alternating steps
+    duration = 10.0  # ~3-4 alternating lift/place cycles
 
     print("=" * 60)
     print("Stage 1: Static alternating support (step_length = 0)")

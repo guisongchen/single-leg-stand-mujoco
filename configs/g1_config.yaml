@@ -137,7 +137,32 @@ walking:
   step_length: 0.25          # forward distance per step (m)
   step_width: 0.20           # lateral distance between feet (m)
   step_height: 0.05          # swing foot clearance above ground (m)
-  single_support_duration: 0.60   # seconds per single-support phase
+  min_single_duration: 0.50  # minimum seconds in single support
+  init_duration: 0.1         # seconds in INIT before first weight shift
   double_support_duration: 0.15   # seconds per double-support phase
-  init_duration: 1.0         # seconds in INIT before first step
-  forward_direction: [1.0, 0.0, 0.0]  # world-frame walking direction
+  phase_timeout: 5.0         # seconds before emergency bipedal fallback
+  forward_direction: [1.0, 0.0]   # world-frame walking direction (xy only)
+  double_support_com_bias: 0.70   # bias toward next support foot in DS
+
+transitions:
+  grf_arm_threshold: 0.50    # fraction of body weight to arm transition
+  grf_fire_threshold: 0.80   # fraction of body weight to fire transition
+  grf_arm_to_fire_delay: 0.05  # minimum seconds between arm and fire
+  grf_touchdown_threshold: 0.10  # fraction of body weight for touchdown
+  grf_liftoff_threshold: 5.0  # newtons; lifted foot must be below this
+  cp_abort_margin: 0.05      # metres outside both-foot hull to abort
+
+safety:
+  touchdown_xy_tolerance: 0.02   # metres from target xy to accept touchdown
+  touchdown_z_tolerance: 0.005  # metres from ground to accept touchdown
+
+swing_weights:
+  xy_early: 0.10             # swing-xy QP weight during first 60% of swing
+  xy_late: 1.0               # swing-xy QP weight during last 40% of swing
+  z: 1.0                     # swing-z QP weight (always)
+
+pelvis_orientation:
+  roll_weight: 0.5           # QP weight for pelvis roll regulation
+  pitch_weight: 0.5          # QP weight for pelvis pitch regulation
+  yaw_weight: 0.3            # QP weight for pelvis yaw regulation
+  target_yaw: 0.0            # desired pelvis yaw (rad)
