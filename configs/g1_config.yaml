@@ -2,11 +2,10 @@ simulation:
   dt: 0.002  # 500 Hz, stable for humanoid contact dynamics
   gravity: [0.0, 0.0, -9.81]
   friction: 0.8
-  model_path: "/home/ccc/projects/unitree_mujoco/unitree_robots/g1/scene_23dof.xml"
+  model_path: "/home/ccc/projects/single_leg_stand_mujoco/models/scene_23dof_clean.xml"
 
 robot:
-  # Floating base is excluded; these are the 29 actuated joints in qpos order
-  # (6 dummy joints at the end maintain IDL compatibility with the 29-DOF model)
+  # Floating base is excluded; these are the 23 actuated joints in qpos order
   joint_names:
     - left_hip_pitch_joint
     - left_hip_roll_joint
@@ -31,12 +30,6 @@ robot:
     - right_shoulder_yaw_joint
     - right_elbow_joint
     - right_wrist_roll_joint
-    - waist_roll_joint
-    - waist_pitch_joint
-    - left_wrist_pitch_joint
-    - left_wrist_yaw_joint
-    - right_wrist_pitch_joint
-    - right_wrist_yaw_joint
 
   body_names:
     pelvis: pelvis
@@ -71,12 +64,6 @@ robot:
     right_shoulder_yaw_joint: 0.0
     right_elbow_joint: 0.0
     right_wrist_roll_joint: 0.0
-    waist_roll_joint: 0.0
-    waist_pitch_joint: 0.0
-    left_wrist_pitch_joint: 0.0
-    left_wrist_yaw_joint: 0.0
-    right_wrist_pitch_joint: 0.0
-    right_wrist_yaw_joint: 0.0
 
   # Initial pelvis position [x, y, z, qw, qx, qy, qz]
   initial_base_pos: [0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0]
