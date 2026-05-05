@@ -256,7 +256,7 @@ def plot(log: dict, metrics: dict, checks: dict) -> None:
             ax.axvline(tc, color="g", ls="--", alpha=0.4)
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_PLOT, dpi=150)
+    plt.savefig(OUTPUT_PLOT, dpi=80)
     print(f"figure saved to {OUTPUT_PLOT}")
 
 
