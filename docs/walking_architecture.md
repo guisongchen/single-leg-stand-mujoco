@@ -1,4 +1,4 @@
-# Milestone: Forward Walking on Flat Ground
+# Walking Gait: Architecture and Specification
 
 ## Objective
 
@@ -60,20 +60,30 @@ Expected walking speed is approximately **0.25 m/s** (~20 s for 5 m), since forw
 
 ### Minimum CoM shift during double support
 
-With `step_length = 0.25 m` and `step_width = 0.20 m`, the CoM must move from the trailing foot's CoP envelope to the leading foot's CoP envelope during double support. The shortest **diagonal** between the closest edges of the two footprints (accounting for both lateral and forward offset) is approximately:
+With `step_length = 0.25 m` and `step_width = 0.20 m`, the CoM must move from the trailing foot's CoP envelope to the leading foot's CoP envelope during double support. The CoP extents (+12 cm forward, −5 cm backward per foot) **shrink** the gap between envelopes:
 
 ```
-d_min = √(0.17² + 0.15²) ≈ 0.23 m
+Forward gap  = step_length − forward_extent − backward_extent
+             = 0.25 − 0.12 − 0.05 = 0.08 m
+
+Lateral gap  = step_width − 2 × lateral_extent
+             = 0.20 − 2 × 0.025 = 0.15 m
 ```
 
-Not 0.17 m (which is only the forward component). Given `a_com_max = 7.85 m/s²`:
+The shortest diagonal between the closest edges of the two CoP envelopes is:
 
 ```
-T_min_ds = √(5.774 × 0.23 / 7.85) ≈ 0.41 s   (quintic smoothstep)
-T_min_ds ≈ √(4 × 0.23 / 7.85) ≈ 0.34 s   (bang-bang, theoretical minimum)
+d_min = √(0.08² + 0.15²) = √(0.0064 + 0.0225) ≈ 0.17 m
 ```
 
-A fixed double-support timer of 0.1–0.2 s would require 17–50 m/s² of CoM acceleration (1.7–5.1g), which is physically impossible. **This is why the design uses event-driven switching instead of a fixed timer** — the double-support phase self-adjusts to however long physics requires.
+Given `a_com_max = 7.85 m/s²`:
+
+```
+T_min_ds = √(5.774 × 0.17 / 7.85) ≈ 0.35 s   (quintic smoothstep)
+T_min_ds ≈ √(4 × 0.17 / 7.85) ≈ 0.29 s   (bang-bang, theoretical minimum)
+```
+
+A fixed double-support timer of 0.15 s would require ~1.7g of CoM acceleration, which is physically impossible. **This is why the design uses event-driven switching instead of a fixed timer** — the double-support phase self-adjusts to however long physics requires.
 
 ### Contact wrench continuity at lift-off
 

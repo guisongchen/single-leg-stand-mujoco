@@ -1,6 +1,6 @@
 # Review: Walking Milestone — Theory & Physics
 
-**Document reviewed:** `docs/walking_milestone_task.md`  
+**Document reviewed:** `docs/walking_architecture.md`  
 **Reviewer:** GLM-5.1 (model-generated review)  
 **Scope:** Theoretical correctness and physical reasonability only. No code implementation concerns.
 
@@ -70,28 +70,24 @@ When transitioning from double to single support, the QP removes one foot's cont
 
 **Recommendation:** Add a transition precondition that the lifting foot's normal contact force must be near zero (e.g., < 5 N) before allowing the phase switch. Alternatively, include a smooth ramp-down of the lift-off foot's contact wrench in the QP over a few timesteps.
 
-### 4. Minimum double-support shift distance undercounts the diagonal
+### 4. Minimum double-support shift distance corrected to diagonal
 
-The document states a minimum shift of 0.17 m, which appears to be a single-component distance. The full center-to-center distance between feet is:
-
-```
-√(0.25² + 0.20²) ≈ 0.32 m
-```
-
-Accounting for CoP envelopes (closest edges):
+The document originally stated a minimum shift of 0.17 m as a single-component distance. The full diagonal between closest CoP envelope edges is:
 
 ```
-√((0.17)² + (0.15)²) ≈ 0.23 m
+Forward gap  = 0.25 − 0.12 − 0.05 = 0.08 m
+Lateral gap  = 0.20 − 2 × 0.025  = 0.15 m
+Diagonal     = √(0.08² + 0.15²)  ≈ 0.17 m
 ```
 
-not 0.17 m. The corrected minimum double-support times are:
+The CoP extents shrink the gap between envelopes — they are subtracted from the inter-foot distances, not added. The correct minimum double-support times are:
 
 ```
-T_quintic = √(5.774 × 0.23 / 7.85) ≈ 0.41 s
-T_bangbang = √(4 × 0.23 / 7.85) ≈ 0.34 s
+T_quintic = √(5.774 × 0.17 / 7.85) ≈ 0.35 s
+T_bangbang = √(4 × 0.17 / 7.85) ≈ 0.29 s
 ```
 
-This does not invalidate the approach (event-driven switching still works), but the time estimates in the document should be revised.
+A fixed 0.15 s timer would require ~1.7g of CoM acceleration. This does not invalidate the approach (event-driven switching still works), but the original document's claim of 0.23 m and 0.41 s was incorrect.
 
 ### 5. Quintic CoM smoothstep has velocity discontinuity at phase boundaries
 
@@ -121,7 +117,7 @@ Time to complete 5 m: ~20 s. This is acceptable for a quasi-static milestone, bu
 
 ## Cross-Reference with Existing Review
 
-Cross-referenced with `docs/review_walking_milestone.md` (8 findings). Below: how the two reviews reinforce each other, where they diverge, and what emerges from their combination.
+Cross-referenced with `docs/review_walking_milestone_ds.md` (post-ADR review). Below: how the two reviews reinforce each other, where they diverge, and what emerges from their combination.
 
 ### Compounding Issues
 
@@ -160,7 +156,7 @@ I flagged the 70/30 bias as "needs clarification" about whether individual-foot 
 |---|---|
 | **#2: Swing-leg angular momentum (~2.8 cm CP shift)** | The existing review mentions swing foot drift at low weight but does not quantify the angular momentum impact on CP. The 2.8 cm shift exceeds the ±1.5 cm effective window, meaning swing momentum alone can push the CP outside the polygon during single support — even after the timing guard and convergence checks pass. This makes the CP-margin problem worse than the existing review assesses. |
 | **#3: Contact wrench discontinuity at lift-off (~1 cm)** | Not in the existing review. A 10 N residual contact force dropped instantaneously produces a ~1 cm CP perturbation, which is significant at the ±1.5 cm margin. This acts on the same scale as the min-guard timing problem. |
-| **#4: Diagonal shift distance (0.17 → 0.23 m)** | The existing review does not challenge the 0.17 m figure. The correct diagonal is ~0.23 m, making the minimum double-support time 0.41 s (quintic) not 0.35 s. This makes weight shift slower than the document assumes, but doesn't affect the event-driven approach. |
+| **#4: Diagonal shift distance (0.17 m)** | The minimum diagonal between closest CoP edges is 0.17 m (forward gap 0.08 m, lateral gap 0.15 m), making the minimum double-support time 0.35 s. A fixed 0.15 s timer requires ~1.7g, confirming event-driven switching is necessary. |
 | **#7: Walking speed (~0.25 m/s, ~20 s for 5 m)** | The existing review does not estimate the expected walking speed. Since the CoM stops during single support, the gait is inherently stop-and-go. Stating the expected speed explicitly allows verification that 5 m is achievable within a reasonable simulation time. |
 
 ### Combined Priority
@@ -177,7 +173,7 @@ Merging both reviews and compounding effects:
 | 6 | Contact wrench discontinuity at lift-off | My #3 | Existing #1, My #1 |
 | 7 | Initial pose unstable for 1.0 s BIPEDAL_INIT | Existing #5 | — |
 | 8 | Quintic velocity mismatch / overshoot at SINGLE phase entry | My #5 + Existing #8 | — |
-| 9 | Minimum shift distance underestimated (0.17 → 0.23 m) | My #4 | — |
+| 9 | Minimum shift distance is 0.17 m (diagonal between closest CoP edges), not a single-component 0.17 m | My #4 | — |
 | 10 | step_width coordinate sign error | Existing #6 | — |
 | 11 | No stated walking speed (~0.25 m/s) | My #7 | — |
 
@@ -213,7 +209,7 @@ Why GRF works and CP doesn't:
 | Add τ_z constraint: `|λ_τz| ≤ (μ·min(w,L)/2)·λ_fz` | Issue #5 |
 | GRF < 5 N precondition before lift-off | Issue #6 (contact wrench discontinuity) |
 | Drop quintic during single support — PD-only setpoint | Issue #8 |
-| Correct minimum shift distance to 0.23 m (diagonal) | Issue #9 |
+| Correct minimum shift distance to 0.17 m (diagonal between closest CoP edges) | Issue #9 |
 | Use absolute lateral positions for footstep targets | Issue #10 |
 | Redefine safety abort: CP outside convex hull of both polygons > 0.05 m | Issue #4 |
 | Document expected walking speed (~0.25 m/s, ~20 s for 5 m) | Issue #11 |
@@ -233,6 +229,6 @@ Why GRF works and CP doesn't:
 | 6 | Contact wrench discontinuity at lift-off | GRF < 5 N precondition for lift-off transition | Resolved |
 | 7 | Unstable initial pose for 1.0 s INIT | Reduce init_duration to 0.1 s | Pending |
 | 8 | Quintic velocity discontinuity at phase boundaries | Drop quintic — PD-only setpoint during single support | Pending |
-| 9 | Minimum shift distance underestimated (0.17 → 0.23 m) | Correct diagonal calculation; revise time estimates | Pending |
+| 9 | Minimum shift distance originally quoted as 0.17 m single-component; correct diagonal is also 0.17 m but from √(0.08²+0.15²) rationale | Correct diagonal calculation; revise time estimates | Pending |
 | 10 | step_width formula coordinate error | Use absolute lateral positions | Pending |
 | 11 | No stated walking speed expectation | Add estimated speed (~0.25 m/s, ~20 s) | Pending |

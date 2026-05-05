@@ -8,7 +8,7 @@ Accepted — Revised (GRF-based transitions, torsional friction, contact ramp-do
 
 The G1 robot (23 DOF + 6 floating base, ~34.13 kg) must walk 5 meters forward on flat ground using alternating single/double support phases. The robot has extremely small feet (CoP envelope ±2.5 cm lateral, 12 cm forward, 5 cm backward), which forces a quasi-static gait where the CoM must be nearly over the support foot before the opposite foot can lift.
 
-Previous iterations used a 4-phase FSM with CP-based transition conditions and a midpoint CoM target during double support. Cross-referenced reviews (`docs/review_walking_milestone.md` and `docs/review_walking_milestone_glm.md`) identified 11 compounding issues:
+Previous iterations used a 4-phase FSM with CP-based transition conditions and a midpoint CoM target during double support. Cross-referenced reviews (`docs/review_walking_milestone_ds.md` and `docs/review_walking_milestone_glm.md`) identified 11 compounding issues:
 
 1. **CP timing mismatch** — The 0.05 s minimum guard exceeds the ~0.03 s CP transit time through the ±1.5 cm window, making transitions impossible to trigger reliably
 2. **Biased midpoint outside target polygon** — The 70/30 CoM target during double support lies outside the next support foot's CoP polygon, so the CP-based event condition can never fire
@@ -184,14 +184,14 @@ def _compute_swing_weights(self, phase_progress):
 
 ### 8. Corrected minimum shift distance and expected walking speed (new)
 
-**Decision:** Use the diagonal shift distance (0.23 m, not 0.17 m) for physics calculations, and document the expected walking speed (~0.25 m/s).
+**Decision:** Use the correct diagonal shift distance (0.17 m, not 0.23 m) for physics calculations, and document the expected walking speed (~0.25 m/s).
 
 **Rationale:**
-- The original 0.17 m was the forward component only. The actual minimum shift between CoP envelopes is the diagonal: `√(0.17² + 0.15²) ≈ 0.23 m`
-- This yields minimum double-support times of 0.41 s (quintic) and 0.34 s (bang-bang), not 0.35 s and 0.29 s
+- The CoP extents (+12 cm forward, −5 cm backward) **shrink** the gap between envelopes: the forward gap is `0.25 − 0.12 − 0.05 = 0.08 m`, not 0.17 m. The correct diagonal is: `√(0.08² + 0.15²) ≈ 0.17 m`
+- This yields minimum double-support times of 0.35 s (quintic) and 0.29 s (bang-bang)
 - The gait is stop-and-go (CoM velocity → 0 during each single-support phase). Expected speed: `0.25 m / (0.5 + 0.4 + 0.15) ≈ 0.25 m/s`, total time for 5 m: ~20 s
 
-**Location:** `docs/walking_milestone_task.md`, `configs/g1_config.yaml`
+**Location:** `docs/walking_architecture.md`, `configs/g1_config.yaml`
 
 ## Consequences
 
@@ -325,7 +325,7 @@ pelvis_orientation:
 
 ## References
 
-- `docs/walking_milestone_task.md` — Full milestone specification with physics constraints and evaluation criteria (updated for GRF transitions)
-- `docs/review_walking_milestone.md` — Original review identifying 8 pitfalls
+- `docs/walking_architecture.md` — Full architecture specification with physics constraints and evaluation criteria (updated for GRF transitions)
+- `docs/review_walking_milestone_ds.md` — Post-ADR cross-referenced review with corrected geometry
 - `docs/review_walking_milestone_glm.md` — Cross-referenced review with integrated solution (GRF-based transitions)
 - `configs/g1_config.yaml` — Robot parameters, initial pose, control gains
