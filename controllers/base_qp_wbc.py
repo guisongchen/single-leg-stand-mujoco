@@ -303,19 +303,17 @@ class QPWBCController:
             step,
         )
 
-        # # ---- Diagnostics -----------------------------------------------
-        # if res.info.iter >= 1000 or res.info.status_val not in (1, 2):
-        #     self._print_osqp_diagnostics(
-        #         step=step,
-        #         res=res,
-        #         com_pos=compute_com_position(model, data),
-        #         constr_eq=constr_eq,
-        #         active_feet=active_feet,
-        #         nx=nx,
-        #         nv=nv,
-        #     )
-
+        # ---- Diagnostics -----------------------------------------------
         if res.info.status_val not in (1, 2):
+            self._print_osqp_diagnostics(
+                step=step,
+                res=res,
+                com_pos=compute_com_position(model, data),
+                constr_eq=constr_eq,
+                active_feet=active_feet,
+                nx=nx,
+                nv=nv,
+            )
             raise RuntimeError(f"OSQP failed at step {step}: {res.info.status}")
 
         x_opt = res.x

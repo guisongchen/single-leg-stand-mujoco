@@ -62,6 +62,8 @@ class WalkingController(QPWBCController):
         self.step_length = float(wcfg.get("step_length", 0.25))
         self.step_width = float(wcfg.get("step_width", 0.20))
         self.step_height = float(wcfg.get("step_height", 0.05))
+        self.swing_duration = float(wcfg.get("swing_duration", 2.0))
+        self.swing_lift_duration = float(wcfg.get("swing_lift_duration", 1.2))
         self.min_single_duration = float(wcfg.get("min_single_duration", 0.50))
         self.init_duration = float(wcfg.get("init_duration", 0.1))
         self.double_support_duration = float(wcfg.get("double_support_duration", 0.15))
@@ -80,6 +82,12 @@ class WalkingController(QPWBCController):
         self.grf_touchdown_threshold = float(tcfg.get("grf_touchdown_threshold", 0.10))
         self.grf_liftoff_threshold = float(tcfg.get("grf_liftoff_threshold", 5.0))
         self.cp_abort_margin = float(tcfg.get("cp_abort_margin", 0.05))
+
+        # ---- support foot contact-loss fallback --------------------------
+        self.support_fallback_kp = float(tcfg.get("support_fallback_kp", 400.0))
+        self.support_fallback_kd = float(tcfg.get("support_fallback_kd", 40.0))
+        self.support_fallback_weight = float(tcfg.get("support_fallback_weight", 500.0))
+        self._support_foot_ground_z: float = 0.0
 
         # ---- safety tolerances -------------------------------------------
         scfg = config.get("safety", {})
@@ -118,6 +126,7 @@ class WalkingController(QPWBCController):
         self._support_foot_name: str | None = None
         self._swing_foot_name: str | None = None
         self._next_support_name: str | None = None
+        self._landing_triggered: bool = False  # one-shot flag to update target xy at landing start
 
         # GRF hysteresis state
         self._grf_armed: bool = False
@@ -128,6 +137,9 @@ class WalkingController(QPWBCController):
 
         # Fixed CoM target during single support (set at entry, not updated)
         self._single_support_com_target: np.ndarray | None = None
+
+        # Ground-level joint config saved at reset(); used as landing PD target
+        self._q_ref_ground: np.ndarray | None = None
 
         # Foot geometry for torsional friction (metres)
         self._foot_width = 2.0 * self.foot_cop_y_half
@@ -143,6 +155,10 @@ class WalkingController(QPWBCController):
 
         self.q_ref = self.env.get_actuated_qpos().copy()
         self.com_start = compute_com_position(model, data)
+
+        # Snapshot the initial standing pose as the landing PD target.
+        # This config has both feet at ground level by construction.
+        self._q_ref_ground = self.env.get_actuated_qpos().copy()
 
         left_pos = self.env.get_body_pos("left_foot")
         right_pos = self.env.get_body_pos("right_foot")
@@ -164,6 +180,7 @@ class WalkingController(QPWBCController):
         self._support_foot_name = None
         self._swing_foot_name = None
         self._next_support_name = "left"  # first weight shift is to left
+        self._landing_triggered = False
 
         self._grf_armed = False
         self._grf_arm_time = 0.0
@@ -208,9 +225,36 @@ class WalkingController(QPWBCController):
         com_target = self._compute_com_target(com_pos)
         self.com_target = com_target
 
+        # ---- Detect landing phase early (needed before task targets) ----
+        is_landing = (
+            self._phase in (LEFT_SINGLE, RIGHT_SINGLE)
+            and dt_phase >= self.swing_lift_duration
+        )
+
+        # One-shot: at the start of landing, update swing_target xy to the current
+        # foot position. The foot drifts during hover (no xy Cartesian control), so
+        # the pre-lift target is stale. For Stage 1 (step_length=0) we just need the
+        # foot to land; exact xy placement is not required.
+        if is_landing and not self._landing_triggered:
+            self._landing_triggered = True
+            if self._swing_foot_name is not None and self._swing_target is not None:
+                current_sw_pos = self.env.get_body_pos(f"{self._swing_foot_name}_foot")
+                self._swing_target = self._swing_target.copy()
+                self._swing_target[:2] = current_sw_pos[:2]
+
         # ---- Task targets -----------------------------------------------
+        # During landing: drive swing joints toward the GROUND config so the
+        # posture task inside the QP lowers the foot.  Using the entry-snapshot
+        # q_ref would ask the QP to maintain the elevated configuration.
+        if is_landing and self._q_ref_ground is not None and self._swing_foot_name is not None:
+            sw_slice = slice(6, 12) if self._swing_foot_name == "right" else slice(0, 6)
+            q_ref_posture = self.q_ref.copy()
+            q_ref_posture[sw_slice] = self._q_ref_ground[sw_slice]
+        else:
+            q_ref_posture = self.q_ref
+
         com_accel_des, cam_rate_des, joint_accel_des, J_cam = self._compute_task_targets(
-            model, data, com_pos, com_target, self.q_ref, q, dq
+            model, data, com_pos, com_target, q_ref_posture, q, dq
         )
 
         # ---- Active feet & swing task -----------------------------------
@@ -221,28 +265,48 @@ class WalkingController(QPWBCController):
         # ---- Temporarily boost single-support task weights -------------
         old_weights = None
         if self._phase in (LEFT_SINGLE, RIGHT_SINGLE):
+            tcfg = self.cfg.get("transition", {})
             old_weights = {
                 "w_com": self.w_com,
                 "w_cam": self.w_cam,
                 "w_posture": self.w_posture,
             }
-            self.w_com = self.cfg.get("transition", {}).get("single_leg_w_com", 200.0)
-            self.w_cam = self.cfg.get("transition", {}).get("single_leg_w_cam", 200.0)
-            self.w_posture = self.cfg.get("transition", {}).get("single_leg_w_posture", 0.01)
+            self.w_com = tcfg.get("single_leg_w_com", 200.0)
+            self.w_cam = tcfg.get("single_leg_w_cam", 200.0)
+            if is_landing:
+                # During landing: keep posture weight at normal level to maintain
+                # support-leg stiffness.  The foot-z Cartesian task (w=500) is much
+                # stronger than the posture task (w=1), so it dominates for the swing
+                # leg DOFs without needing to reduce posture weight globally.
+                self.w_posture = tcfg.get("landing_w_posture", 1.0)
+            else:
+                self.w_posture = tcfg.get("single_leg_w_posture", 1.0)
+        if is_landing or self._phase in (LEFT_SINGLE, RIGHT_SINGLE):
+            # During entire single-support (hover + descent): drop CoM-z task.
+            # The swing trajectory's z task handles the vertical component; the
+            # CoM-z task would fight the foot-descent via pelvis coupling.
+            J_com_qp = J_com[:2]
+            com_accel_des_qp = com_accel_des[:2]
+            com_z_task = []
+        else:
+            J_com_qp = J_com
+            com_accel_des_qp = com_accel_des
+            com_z_task = []
 
         # ---- QP solve ---------------------------------------------------
+        all_extra = (extra_tasks or []) + swing_tasks + com_z_task
         qacc_des, wrenches, tau = self._solve_qp(
             model=model,
             data=data,
-            J_com=J_com,
+            J_com=J_com_qp,
             J_cam=J_cam,
-            com_accel_des=com_accel_des,
+            com_accel_des=com_accel_des_qp,
             cam_rate_des=cam_rate_des,
             joint_accel_des=joint_accel_des,
             active_feet=active_feet,
             bias_force=bias_force,
             swing_task=None,  # we fold swing into extra_tasks
-            extra_tasks=(extra_tasks + swing_tasks) if (extra_tasks or swing_tasks) else None,
+            extra_tasks=all_extra if all_extra else None,
         )
 
         # Restore weights
@@ -316,6 +380,7 @@ class WalkingController(QPWBCController):
         self._grf_armed = False
         self._grf_arm_time = 0.0
         self._com_planner = None
+        self._landing_triggered = False  # reset so the one-shot fires for this step
 
         # Fix the CoM target at the support foot CoP centre so the controller
         # does not chase a slipping foot.
@@ -324,6 +389,9 @@ class WalkingController(QPWBCController):
         com_target = self._foot_center_world(foot_pos, foot_bid)
         com_target[2] = self.com_start[2]
         self._single_support_com_target = com_target
+
+        # Snapshot the ground z of the support foot for contact-loss fallback.
+        self._support_foot_ground_z = float(foot_pos[2])
 
         # Snapshot the current actuated pose as the reference posture for
         # single support.  Using the initial upright q_ref fights the leaned
@@ -391,23 +459,31 @@ class WalkingController(QPWBCController):
             ]
 
         elif self._phase in (WEIGHT_SHIFT_L, WEIGHT_SHIFT_R):
-            # Both feet stay in the QP, but the swing foot gets a gentle
-            # upward acceleration offset as it unloads.  The support foot
-            # is a pure hard constraint (no damping) so weight can transfer
-            # naturally.  This matches the TransitionController exactly.
+            # Both feet stay in the QP with velocity damping.  The unloading
+            # (future swing) foot also gets a gentle upward acceleration bias
+            # as it unloads.  Velocity damping prevents OSQP infeasibility
+            # when the feet have small nonzero velocities after landing.
+            foot_kd = self.cfg.get("transition", {}).get("foot_kd", 40.0)
+            left_vel = J_left @ data.qvel
+            right_vel = J_right @ data.qvel
+
             swing_fz_now = self._compute_grf(f"{self._swing_foot_name}_foot")
             unload_frac = np.clip(1.0 - swing_fz_now / 80.0, 0.0, 1.0)
             a_lift = 1.0 * unload_frac
 
             if self._swing_foot_name == "left":
                 active_feet = [
-                    {"jacobian": J_left, "name": "left_foot", "accel_offset": np.array([0.0, 0.0, a_lift, 0.0, 0.0, 0.0])},
-                    {"jacobian": J_right, "name": "right_foot"},
+                    {"jacobian": J_left, "name": "left_foot",
+                     "accel_offset": np.array([0.0, 0.0, a_lift, 0.0, 0.0, 0.0]) - foot_kd * left_vel},
+                    {"jacobian": J_right, "name": "right_foot",
+                     "accel_offset": -foot_kd * right_vel},
                 ]
             else:
                 active_feet = [
-                    {"jacobian": J_left, "name": "left_foot"},
-                    {"jacobian": J_right, "name": "right_foot", "accel_offset": np.array([0.0, 0.0, a_lift, 0.0, 0.0, 0.0])},
+                    {"jacobian": J_left, "name": "left_foot",
+                     "accel_offset": -foot_kd * left_vel},
+                    {"jacobian": J_right, "name": "right_foot",
+                     "accel_offset": np.array([0.0, 0.0, a_lift, 0.0, 0.0, 0.0]) - foot_kd * right_vel},
                 ]
             # Pelvis orientation task stabilises the trunk while weight
             # transfers; without it the robot rotates freely and the fixed-foot
@@ -423,18 +499,50 @@ class WalkingController(QPWBCController):
                 J_support = J_right
                 J_swing = J_left
 
-            support_vel = J_support @ data.qvel
-            active_feet = [
-                {
-                    "jacobian": J_support,
-                    "name": f"{self._support_foot_name}_foot",
-                    "accel_offset": -self.cfg.get("transition", {}).get("foot_kd", 40.0) * support_vel,
-                },
-            ]
+            support_fz = self._compute_grf(f"{self._support_foot_name}_foot")
+            if support_fz < 5.0:
+                # Support foot lost contact — degrade to soft position tracking
+                # to avoid QP infeasibility from an unfulfillable hard equality.
+                support_body_pos = self.env.get_body_pos(
+                    f"{self._support_foot_name}_foot"
+                )
+                target_pos = np.array([
+                    support_body_pos[0],
+                    support_body_pos[1],
+                    self._support_foot_ground_z,
+                ])
+                support_vel = J_support[:3] @ data.qvel
+                support_accel_des = (
+                    self.support_fallback_kp * (target_pos - support_body_pos)
+                    + self.support_fallback_kd * (-support_vel)
+                )
+                active_feet = []
+                extra_tasks = self._build_pelvis_orientation_task()
+                extra_tasks.append((
+                    self.support_fallback_weight,
+                    J_support[:3],
+                    support_accel_des,
+                ))
+            else:
+                foot_kd = self.cfg.get("transition", {}).get("foot_kd", 40.0)
+                support_vel = J_support @ data.qvel
+                active_feet = [
+                    {
+                        "jacobian": J_support,
+                        "name": f"{self._support_foot_name}_foot",
+                        "accel_offset": -foot_kd * support_vel,
+                    },
+                ]
+                extra_tasks = self._build_pelvis_orientation_task()
 
-            # Swing foot trajectory
-            if self.swing_planner is not None:
-                swing_pos_traj, swing_vel_traj, swing_accel_traj = self.swing_planner.evaluate(dt_phase)
+            # Swing foot task: trajectory tracking for the full swing duration
+            # (lift + hold + descent).  The quintic profile naturally brings the
+            # foot to target_z with zero terminal velocity, avoiding the violent
+            # impulse that a Cartesian landing pull task would create.
+            if active_feet and self.swing_planner is not None:
+                # Clamp to swing_duration so the trajectory holds at target after landing
+                dt_traj = min(dt_phase, self.swing_duration)
+                swing_pos_traj, swing_vel_traj, swing_accel_traj = self.swing_planner.evaluate(dt_traj)
                 current_swing_pos = self.env.get_body_pos(f"{self._swing_foot_name}_foot")
                 current_swing_vel = J_swing[:3] @ data.qvel
 
@@ -447,14 +555,11 @@ class WalkingController(QPWBCController):
                     + swing_kd * (swing_vel_traj - current_swing_vel)
                 )
 
-                # Swing tracking: z-only for static alternating support;
-                # xy is free to move with the body to avoid trunk disturbance.
-                phase_progress = min(dt_phase / self.min_single_duration, 1.0)
-                _, z_weight = self._compute_swing_weights(phase_progress)
+                phase_progress = min(dt_phase / self.swing_duration, 1.0)
+                xy_weight, z_weight = self._compute_swing_weights(phase_progress)
 
                 swing_tasks.append((z_weight, J_swing[2:3], swing_accel_des[2:3]))
-
-            extra_tasks = self._build_pelvis_orientation_task()
+                swing_tasks.append((xy_weight, J_swing[:2], swing_accel_des[:2]))
 
         elif self._phase == DOUBLE_SUPPORT:
             # Both feet 6-D with velocity damping
@@ -575,10 +680,9 @@ class WalkingController(QPWBCController):
     def _setup_swing_phase(self) -> None:
         """Initialise swing foot planner for the new step.
 
-        Uses the old lift-only SwingFootPlanner (no descent) to match the
-        TransitionController, which holds the foot clear of the ground for the
-        entire single-support phase.  The WalkingController's touchdown check
-        handles the descent timing instead of a fixed trajectory.
+        Uses SwingTrajectoryPlanner (lift + hold + descent) so the foot
+        descends to ground level at the target position and the touchdown
+        check can fire normally.
         """
         support_pos = self.env.get_body_pos(f"{self._support_foot_name}_foot")
         swing_pos = self.env.get_body_pos(f"{self._swing_foot_name}_foot")
@@ -588,12 +692,14 @@ class WalkingController(QPWBCController):
         self._swing_target = self.footstep_planner.plan_step(support_pos, pelvis_yaw, is_right_swing)
         self._swing_foot_start = swing_pos.copy()
 
-        # Use old lift-only planner; keep the foot clear until touchdown check
-        # fires, rather than descending on a fixed schedule.
-        self.swing_planner = SwingFootPlanner(
+        wcfg = self.cfg.get("walking", {})
+        lift_height = float(wcfg.get("step_height", 0.05))
+
+        self.swing_planner = SwingTrajectoryPlanner(
             self._swing_foot_start,
-            self.cfg.get("transition", {}).get("swing_lift_height", 0.03),
-            self.cfg.get("transition", {}).get("swing_rise_duration", 1.0),
+            self._swing_target,
+            lift_height,
+            self.swing_duration,
         )
 
     # ------------------------------------------------------------------ #
@@ -652,7 +758,11 @@ class WalkingController(QPWBCController):
         swing_pos = self.env.get_body_pos(f"{swing_foot_name}_foot")
         support_pos = self.env.get_body_pos(f"{self._support_foot_name}_foot")
 
-        z_ok = abs(swing_pos[2] - support_pos[2]) < self.touchdown_z_tolerance
+        # Relax z tolerance during landing phase — the pull task drives the foot
+        # to ground level, so any contact that fires is at the right height.
+        dt_phase = self.env.data.time - self._phase_start_time
+        z_tol = self.touchdown_z_tolerance * 3 if dt_phase >= self.swing_lift_duration else self.touchdown_z_tolerance
+        z_ok = abs(swing_pos[2] - support_pos[2]) < z_tol
         xy_ok = np.linalg.norm(swing_pos[:2] - target_xy[:2]) < self.touchdown_xy_tolerance
         grf_ok = self._compute_grf(f"{swing_foot_name}_foot") > self.grf_touchdown_threshold * self._total_mass * 9.81
 
@@ -688,8 +798,15 @@ class WalkingController(QPWBCController):
     # ------------------------------------------------------------------ #
 
     def _build_wrench_cones(self, nv: int, active_feet: list):
-        """Extend base wrench cones with torsional friction for 6-D contacts."""
+        """Extend base wrench cones with torsional friction for 6-D contacts.
+
+        Torsional constraint is skipped during single-support phases: the pelvis
+        orientation task demands yaw torque that would otherwise bind against the
+        limit, causing foot slip.
+        """
         A, l, u = super()._build_wrench_cones(nv, active_feet)
+        if self._phase in (LEFT_SINGLE, RIGHT_SINGLE):
+            return A, l, u
 
         # Count how many extra rows we need for torsional friction
         lambda_dims = [foot["jacobian"].shape[0] for foot in active_feet]
