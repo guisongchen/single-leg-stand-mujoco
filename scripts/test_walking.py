@@ -108,8 +108,10 @@ def assess(log: dict) -> tuple[dict, dict]:
 
     left_swing_mask = states == "LEFT_SINGLE"
     right_swing_mask = states == "RIGHT_SINGLE"
-    left_clearance = np.max(left_z[left_swing_mask]) - np.min(left_z) if left_swing_mask.any() else 0.0
-    right_clearance = np.max(right_z[right_swing_mask]) - np.min(right_z) if right_swing_mask.any() else 0.0
+    # During LEFT_SINGLE the right foot is the swing foot; during RIGHT_SINGLE
+    # the left foot is the swing foot.  Measure clearance on the swing foot.
+    left_clearance = np.max(left_z[right_swing_mask]) - np.min(left_z) if right_swing_mask.any() else 0.0
+    right_clearance = np.max(right_z[left_swing_mask]) - np.min(right_z) if left_swing_mask.any() else 0.0
 
     total_steps = log["step_count"][-1] if log["step_count"] else 0
 

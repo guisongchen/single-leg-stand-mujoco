@@ -106,8 +106,10 @@ transition:
   swing_rise_duration: 1.0   # seconds to reach full lift
 
   # Swing foot tracking gains (PD on acceleration)
-  swing_kp: 50.0
+  swing_kp: 120.0
   swing_kd: 15.0
+  swing_land_accel: 0.0     # extra downward z-accel after trajectory ends (m/s^2)
+  min_weight_shift_duration: 1.5  # minimum seconds in weight shift before single support
 
   # State-switch thresholds
   swing_unload_force: 20.0   # switch to single leg when swing fz drops below this (N)
@@ -121,7 +123,7 @@ transition:
   pelvis_kd: 5.0             # pelvis orientation PD derivative gain
   pelvis_weight: 5.0         # QP weight for pelvis orientation task
   single_leg_w_com: 200.0    # boosted CoM weight during single-leg phase
-  single_leg_w_cam: 200.0    # boosted CAM weight during single-leg phase
+  single_leg_w_cam: 20.0     # reduced CAM weight so swing-leg motion isn't blocked
   single_leg_w_posture: 0.01 # reduced posture weight during single-leg phase
 
   # Bipedal return phase (single-leg -> bipedal)
@@ -137,6 +139,8 @@ walking:
   step_length: 0.25          # forward distance per step (m)
   step_width: 0.20           # lateral distance between feet (m)
   step_height: 0.05          # swing foot clearance above ground (m)
+  swing_duration: 1.5        # total seconds for one swing phase
+  swing_lift_duration: 0.9   # seconds before landing phase starts
   min_single_duration: 0.50  # minimum seconds in single support
   init_duration: 0.1         # seconds in INIT before first weight shift
   double_support_duration: 0.15   # seconds per double-support phase
@@ -148,7 +152,7 @@ transitions:
   grf_arm_threshold: 0.50    # fraction of body weight to arm transition
   grf_fire_threshold: 0.80   # fraction of body weight to fire transition
   grf_arm_to_fire_delay: 0.05  # minimum seconds between arm and fire
-  grf_touchdown_threshold: 0.10  # fraction of body weight for touchdown
+  grf_touchdown_threshold: 0.025 # fraction of body weight for touchdown
   grf_liftoff_threshold: 5.0  # newtons; lifted foot must be below this
   cp_abort_margin: 0.05      # metres outside both-foot hull to abort
 
@@ -157,9 +161,9 @@ safety:
   touchdown_z_tolerance: 0.005  # metres from ground to accept touchdown
 
 swing_weights:
-  xy_early: 0.10             # swing-xy QP weight during first 60% of swing
+  xy_early: 1.0              # swing-xy QP weight during first 60% of swing
   xy_late: 1.0               # swing-xy QP weight during last 40% of swing
-  z: 1.0                     # swing-z QP weight (always)
+  z: 200.0                   # swing-z QP weight (must be high for accurate landing)
 
 pelvis_orientation:
   roll_weight: 0.5           # QP weight for pelvis roll regulation

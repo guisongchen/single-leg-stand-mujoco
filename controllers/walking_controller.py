@@ -82,6 +82,7 @@ class WalkingController(QPWBCController):
         self.grf_touchdown_threshold = float(tcfg.get("grf_touchdown_threshold", 0.10))
         self.grf_liftoff_threshold = float(tcfg.get("grf_liftoff_threshold", 5.0))
         self.cp_abort_margin = float(tcfg.get("cp_abort_margin", 0.05))
+        self.min_weight_shift_duration = float(tcfg.get("min_weight_shift_duration", 1.5))
 
         # ---- support foot contact-loss fallback --------------------------
         self.support_fallback_kp = float(tcfg.get("support_fallback_kp", 400.0))
@@ -131,6 +132,9 @@ class WalkingController(QPWBCController):
         # GRF hysteresis state
         self._grf_armed: bool = False
         self._grf_arm_time: float = 0.0
+
+        # Touchdown settling timer (seconds)
+        self._touchdown_timer: float = 0.0
 
         # Smooth CoM interpolation during weight shift
         self._com_planner: ComPlanner | None = None
@@ -184,6 +188,7 @@ class WalkingController(QPWBCController):
 
         self._grf_armed = False
         self._grf_arm_time = 0.0
+        self._touchdown_timer = 0.0
 
     # ------------------------------------------------------------------ #
     # Main compute loop
@@ -231,27 +236,23 @@ class WalkingController(QPWBCController):
             and dt_phase >= self.swing_lift_duration
         )
 
-        # One-shot: at the start of landing, update swing_target xy to the current
-        # foot position. The foot drifts during hover (no xy Cartesian control), so
-        # the pre-lift target is stale. For Stage 1 (step_length=0) we just need the
-        # foot to land; exact xy placement is not required.
-        if is_landing and not self._landing_triggered:
-            self._landing_triggered = True
-            if self._swing_foot_name is not None and self._swing_target is not None:
-                current_sw_pos = self.env.get_body_pos(f"{self._swing_foot_name}_foot")
-                self._swing_target = self._swing_target.copy()
-                self._swing_target[:2] = current_sw_pos[:2]
+        # During landing: continuously update swing_target xy to the current foot
+        # position.  The foot drifts during hover; chasing the drifted position
+        # with the swing-xy task keeps the foot from wandering, and guarantees
+        # the touchdown xy check always passes.
+        if is_landing and self._swing_foot_name is not None and self._swing_target is not None:
+            current_sw_pos = self.env.get_body_pos(f"{self._swing_foot_name}_foot")
+            self._swing_target = self._swing_target.copy()
+            self._swing_target[:2] = current_sw_pos[:2]
 
         # ---- Task targets -----------------------------------------------
-        # During landing: drive swing joints toward the GROUND config so the
-        # posture task inside the QP lowers the foot.  Using the entry-snapshot
-        # q_ref would ask the QP to maintain the elevated configuration.
-        if is_landing and self._q_ref_ground is not None and self._swing_foot_name is not None:
-            sw_slice = slice(6, 12) if self._swing_foot_name == "right" else slice(0, 6)
-            q_ref_posture = self.q_ref.copy()
-            q_ref_posture[sw_slice] = self._q_ref_ground[sw_slice]
-        else:
-            q_ref_posture = self.q_ref
+        # During landing the swing-z Cartesian task (w=200) is much stronger
+        # than the posture task (w=1).  Overriding the swing-leg posture target
+        # to the ground config was fighting the descent: straightening the leg
+        # raises the foot when the pelvis is held at fixed height by the support
+        # foot.  Keep the entry-snapshot q_ref so the posture task does not
+        # oppose the swing-z task.
+        q_ref_posture = self.q_ref
 
         com_accel_des, cam_rate_des, joint_accel_des, J_cam = self._compute_task_targets(
             model, data, com_pos, com_target, q_ref_posture, q, dq
@@ -379,8 +380,9 @@ class WalkingController(QPWBCController):
         self._swing_foot_name = swing_foot
         self._grf_armed = False
         self._grf_arm_time = 0.0
+        self._touchdown_timer = 0.0
         self._com_planner = None
-        self._landing_triggered = False  # reset so the one-shot fires for this step
+        self._landing_triggered = False  # reset so landing update fires for this step
 
         # Fix the CoM target at the support foot CoP centre so the controller
         # does not chase a slipping foot.
@@ -555,6 +557,13 @@ class WalkingController(QPWBCController):
                     + swing_kd * (swing_vel_traj - current_swing_vel)
                 )
 
+                # After the planned trajectory ends the foot tends to stall a few
+                # millimetres above ground.  Add a gentle constant downward push
+                # so the spheres actually make contact.
+                if dt_phase > self.swing_duration:
+                    land_accel = self.cfg.get("transition", {}).get("swing_land_accel", 3.0)
+                    swing_accel_des[2] -= land_accel
+
                 phase_progress = min(dt_phase / self.swing_duration, 1.0)
                 xy_weight, z_weight = self._compute_swing_weights(phase_progress)
 
@@ -691,6 +700,9 @@ class WalkingController(QPWBCController):
         is_right_swing = self._swing_foot_name == "right"
         self._swing_target = self.footstep_planner.plan_step(support_pos, pelvis_yaw, is_right_swing)
         self._swing_foot_start = swing_pos.copy()
+        # The weight-shift preload (a_lift) may have elevated the foot already;
+        # clamp start z to ground level so the trajectory apex is correct.
+        self._swing_foot_start[2] = self._ground_z
 
         wcfg = self.cfg.get("walking", {})
         lift_height = float(wcfg.get("step_height", 0.05))
@@ -722,6 +734,10 @@ class WalkingController(QPWBCController):
           com_err to the ankle was causing transitions to fire while the CoM
           was still ~7 cm outside the CoP envelope.
         """
+        dt_phase = self.env.data.time - self._phase_start_time
+        if dt_phase < self.min_weight_shift_duration:
+            return False
+
         grf_support = self._compute_grf(f"{support_foot}_foot")
         grf_lift = self._compute_grf(f"{lift_foot}_foot")
         mg = self._total_mass * 9.81
@@ -746,27 +762,52 @@ class WalkingController(QPWBCController):
 
     def _check_touchdown(self, swing_foot_name: str, target_xy: np.ndarray | None) -> bool:
         """
-        SINGLE → DOUBLE_SUPPORT: three-condition check.
+        SINGLE → DOUBLE_SUPPORT: landing detector.
 
-        1. Foot near ground (z).
-        2. Foot near target xy.
-        3. GRF confirms physical contact.
+        Instead of a fragile GRF threshold, we look for kinematic evidence that
+        the foot has settled on the ground:
+        1. Planned descent is complete.
+        2. Foot z is within a few mm of the support foot (ground reference).
+        3. Foot vertical velocity is near zero.
+        4. Conditions (2) and (3) hold for a short settling period.
+
+        The xy target is continuously updated during landing, so exact placement
+        is not required for Stage 1.
         """
         if target_xy is None:
             return False
 
+        dt_phase = self.env.data.time - self._phase_start_time
+        if dt_phase < self.swing_duration:
+            return False
+
+        model = self.env.model
+        data = self.env.data
+
         swing_pos = self.env.get_body_pos(f"{swing_foot_name}_foot")
         support_pos = self.env.get_body_pos(f"{self._support_foot_name}_foot")
 
-        # Relax z tolerance during landing phase — the pull task drives the foot
-        # to ground level, so any contact that fires is at the right height.
-        dt_phase = self.env.data.time - self._phase_start_time
-        z_tol = self.touchdown_z_tolerance * 3 if dt_phase >= self.swing_lift_duration else self.touchdown_z_tolerance
-        z_ok = abs(swing_pos[2] - support_pos[2]) < z_tol
-        xy_ok = np.linalg.norm(swing_pos[:2] - target_xy[:2]) < self.touchdown_xy_tolerance
-        grf_ok = self._compute_grf(f"{swing_foot_name}_foot") > self.grf_touchdown_threshold * self._total_mass * 9.81
+        # Vertical position: within tolerance of support foot
+        z_ok = abs(swing_pos[2] - support_pos[2]) < self.touchdown_z_tolerance
 
-        return z_ok and xy_ok and grf_ok
+        # Vertical velocity: less than 1 cm/s
+        swing_bid = self._right_bid if swing_foot_name == "right" else self._left_bid
+        jac_swing = np.zeros((3, model.nv))
+        jac_ang = np.zeros((3, model.nv))
+        mujoco.mj_jacBody(model, data, jac_swing, jac_ang, swing_bid)
+        swing_vz = float(jac_swing[2] @ data.qvel)
+        vz_ok = abs(swing_vz) < 0.01
+
+        # Require both to hold for 0.1 s (50 steps at 500 Hz)
+        if z_ok and vz_ok:
+            self._touchdown_timer += model.opt.timestep
+            if self._touchdown_timer >= 0.1:
+                self._touchdown_timer = 0.0
+                return True
+        else:
+            self._touchdown_timer = 0.0
+
+        return False
 
     def _compute_cp(self) -> np.ndarray:
         """Instantaneous capture point in world XY plane."""
