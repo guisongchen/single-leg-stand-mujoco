@@ -12,6 +12,7 @@ wheels/
 # IDE / tool artifacts
 .claude/
 .DS_Store
+.vscode/
 
 # Generated logs and data
 *.log
