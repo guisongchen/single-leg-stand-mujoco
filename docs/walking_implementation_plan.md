@@ -303,8 +303,20 @@ This is documented as a concern in `docs/review_walking_milestone_ds.md` (§Rema
 ### 3.5 Test script
 
 - Run for 10 seconds, 3–5 steps
-- Log: forward displacement, foot placement error, pelvis yaw, CoM tracking error
-- Pass if: no falls, foot placement error < 0.05 m RMSE, yaw drift < 2° per step
+- Log: forward displacement, foot placement error, pelvis yaw, CoM tracking error, support slip, foot clearance, GRF at liftoff
+
+Pass criteria:
+
+| Check | Threshold | Rationale |
+|-------|-----------|-----------|
+| No fall | pelvis z > 0.5 m, |roll|,|pitch| < 15° | Hard safety |
+| Pelvis stable | |roll|,|pitch| < 5° RMS during single support | Verifies orientation regulation |
+| Forward displacement | ≥ 0.5 × step_length × num_steps | Verifies actual forward motion |
+| Foot placement RMSE | < 0.05 m | Allowed 50% of step length for first forward steps |
+| Yaw drift per step | < 2° | 2° on 0.10 m step = 3.5 mm lateral error |
+| Support slip | < 0.005 m | 20% of lateral CoP margin (±0.025 m) |
+| Foot clearance | > 0.02 m | Verifies actual lift, not slide |
+| GRF at liftoff | support > 80% mg, swing < 5 N | Per architecture GRF hysteresis |
 
 ---
 

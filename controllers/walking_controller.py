@@ -738,13 +738,36 @@ class WalkingController(QPWBCController):
         Uses SwingTrajectoryPlanner (lift + hold + descent) so the foot
         descends to ground level at the target position and the touchdown
         check can fire normally.
+
+        Applies CP safety abort: if CP is > cp_abort_margin outside the
+        combined foot polygon, the step is reduced to in-place.
         """
         support_pos = self.env.get_body_pos(f"{self._support_foot_name}_foot")
         swing_pos = self.env.get_body_pos(f"{self._swing_foot_name}_foot")
 
         pelvis_yaw = euler_from_quat(*self.env.get_pelvis_quat())[2]
         is_right_swing = self._swing_foot_name == "right"
-        self._swing_target = self.footstep_planner.plan_step(support_pos, pelvis_yaw, is_right_swing)
+
+        # ---- CP safety abort ------------------------------------------------
+        effective_step_length = self.step_length
+        if effective_step_length > 0.0:
+            cp = self._compute_cp()
+            if not self._is_cp_inside_combined_polygon(cp):
+                # CP is outside both foot rectangles.  Measure how far.
+                dist_out = self._cp_distance_outside(cp)
+                if dist_out > self.cp_abort_margin:
+                    effective_step_length = 0.0
+        # ---------------------------------------------------------------------
+
+        if effective_step_length > 0.0:
+            self._swing_target = self.footstep_planner.plan_step(
+                support_pos, pelvis_yaw, is_right_swing,
+            )
+        else:
+            # Step in place: target = swing foot's current XY at ground Z
+            lateral_y = -self.step_width / 2.0 if is_right_swing else self.step_width / 2.0
+            self._swing_target = np.array([swing_pos[0], lateral_y, self._ground_z])
+
         self._swing_foot_start = swing_pos.copy()
         # The weight-shift preload (a_lift) may have elevated the foot already;
         # clamp start z to ground level so the trajectory apex is correct.
@@ -890,6 +913,26 @@ class WalkingController(QPWBCController):
             )
 
         return _inside_foot(cp_left) or _inside_foot(cp_right)
+
+    def _cp_distance_outside(self, cp: np.ndarray) -> float:
+        """Return the minimum signed distance the CP is outside *both* foot rectangles.
+
+        Positive = CP is outside.  Zero = CP is inside at least one foot.
+        """
+        left_pos = self.env.get_body_pos("left_foot")
+        right_pos = self.env.get_body_pos("right_foot")
+        left_R = self.env.data.xmat[self._left_bid].reshape(3, 3)
+        right_R = self.env.data.xmat[self._right_bid].reshape(3, 3)
+
+        def _foot_dist(cp_local):
+            dx = max(0.0, self.foot_cop_x_back + cp_local[0], cp_local[0] - self.foot_cop_x_forward)
+            dy = max(0.0, abs(cp_local[1]) - self.foot_cop_y_half)
+            return np.sqrt(dx**2 + dy**2) if dx > 0 or dy > 0 else 0.0
+
+        cp_left = left_R.T @ np.append(cp - left_pos[:2], 0.0)
+        cp_right = right_R.T @ np.append(cp - right_pos[:2], 0.0)
+
+        return float(min(_foot_dist(cp_left), _foot_dist(cp_right)))
 
     # ------------------------------------------------------------------ #
     # Wrench cone override (torsional friction)

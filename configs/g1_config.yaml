@@ -119,12 +119,13 @@ transition:
 
   # Single-leg balance tuning
   foot_kd: 40.0              # support-foot velocity damping to prevent slip
-  pelvis_kp: 30.0            # pelvis orientation PD proportional gain
-  pelvis_kd: 5.0             # pelvis orientation PD derivative gain
-  pelvis_weight: 5.0         # QP weight for pelvis orientation task
+  pelvis_kp: 200.0           # pelvis orientation PD proportional gain
+  pelvis_kd: 20.0            # pelvis orientation PD derivative gain
+  pelvis_weight: 50.0        # QP weight for pelvis orientation task
   single_leg_w_com: 200.0    # boosted CoM weight during single-leg phase
-  single_leg_w_cam: 20.0     # reduced CAM weight so swing-leg motion isn't blocked
+  single_leg_w_cam: 200.0    # CAM weight during single-leg phase
   single_leg_w_posture: 0.01 # reduced posture weight during single-leg phase
+  landing_w_posture: 1.0     # posture weight during landing (descent) phase
   single_leg_kd_com: 40.0    # boosted CoM damping during single-leg phase
 
   # Bipedal return phase (single-leg -> bipedal)
@@ -137,9 +138,9 @@ transition:
   return_land_kd: 40.0       # PD derivative gain for soft landing impedance
 
 walking:
-  step_length: 0.25          # forward distance per step (m)
+  step_length: 0.10          # forward distance per step (m) - Stage 3
   step_width: 0.20           # lateral distance between feet (m)
-  step_height: 0.03          # swing foot clearance above ground (m)
+  step_height: 0.05          # swing foot clearance above ground (m)
   swing_duration: 0.6        # total seconds for one swing phase
   swing_lift_duration: 0.36  # seconds before landing phase starts
   min_single_duration: 0.50  # minimum seconds in single support
@@ -162,8 +163,8 @@ safety:
   touchdown_z_tolerance: 0.005  # metres from ground to accept touchdown
 
 swing_weights:
-  xy_early: 10.0             # swing-xy QP weight during first 60% of swing
-  xy_late: 10.0              # swing-xy QP weight during last 40% of swing
+  xy_early: 0.1              # swing-xy QP weight during first 60% of swing (gentle)
+  xy_late: 1.0               # swing-xy QP weight during last 40% of swing
   z: 200.0                   # swing-z QP weight (must be high for accurate landing)
 
 pelvis_orientation:
