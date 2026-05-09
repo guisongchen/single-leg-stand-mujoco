@@ -139,13 +139,13 @@ transition:
 
 walking:
   step_length: 0.10          # forward distance per step (m) - Stage 3
-  step_width: 0.20           # lateral distance between feet (m)
+  step_width: 0.20            # lateral distance between feet (m)
   step_height: 0.05          # swing foot clearance above ground (m)
   swing_duration: 0.6        # total seconds for one swing phase
   swing_lift_duration: 0.36  # seconds before landing phase starts
   min_single_duration: 0.50  # minimum seconds in single support
-  init_duration: 0.1         # seconds in INIT before first weight shift
-  double_support_duration: 0.20   # seconds per double-support phase
+  init_duration: 1.0         # seconds in INIT before first weight shift
+  double_support_duration: 0.80   # seconds per double-support phase
   phase_timeout: 5.0         # seconds before emergency bipedal fallback
   forward_direction: [1.0, 0.0]   # world-frame walking direction (xy only)
   double_support_com_bias: 0.70   # bias toward next support foot in DS
@@ -154,7 +154,7 @@ transitions:
   grf_arm_threshold: 0.50    # fraction of body weight to arm transition
   grf_fire_threshold: 0.80   # fraction of body weight to fire transition
   grf_arm_to_fire_delay: 0.05  # minimum seconds between arm and fire
-  grf_touchdown_threshold: 0.025 # fraction of body weight for touchdown
+  grf_touchdown_threshold: 0.10  # fraction of body weight for touchdown
   grf_liftoff_threshold: 5.0  # newtons; lifted foot must be below this
   cp_abort_margin: 0.05      # metres outside both-foot hull to abort
 

@@ -557,7 +557,7 @@ def main() -> None:
     controller = WalkingController(env, cfg)
     controller.reset()
 
-    duration = 10.0
+    duration = 20.0
 
     print("=" * 60)
     print(f"{stage_label}  (step_length = {step_length:.2f} m)")

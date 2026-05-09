@@ -523,7 +523,10 @@ class QPWBCController:
                 m = foot["jacobian"].shape[0]
                 w = res.x[start:start + m]
                 start += m
-                print(f"  {foot['name']:6s} fz={w[2]:7.2f}  |fx|/fz={abs(w[0])/(w[2]+1e-6):.3f}")
+                if m >= 3:
+                    print(f"  {foot['name']:6s} fz={w[2]:7.2f}  |fx|/fz={abs(w[0])/(w[2]+1e-6):.3f}")
+                elif m == 1:
+                    print(f"  {foot['name']:6s} fz={w[0]:7.2f}  (1-D)")
 
         from utils.kinematics import compute_contact_wrench
         for foot in active_feet:
