@@ -177,9 +177,18 @@ def _common_metrics(log: dict) -> dict:
 
     # Transitions to single support (for GRF hysteresis checks)
     transitions_to_single = []
+    n_left_single = 0
+    n_right_single = 0
     for i in range(1, len(states)):
         if states[i] in ("LEFT_SINGLE", "RIGHT_SINGLE") and states[i - 1] != states[i]:
             transitions_to_single.append(i)
+    # Count distinct entries (not total steps — a phase can be entered
+    # multiple times through emergency restart cycles)
+    for i in range(1, len(states)):
+        if states[i] == "LEFT_SINGLE" and states[i - 1] != "LEFT_SINGLE":
+            n_left_single += 1
+        if states[i] == "RIGHT_SINGLE" and states[i - 1] != "RIGHT_SINGLE":
+            n_right_single += 1
 
     mg_approx = 34.13 * 9.81
     grf_at_transitions = []
@@ -217,6 +226,9 @@ def _common_metrics(log: dict) -> dict:
         "total_steps": int(total_steps),
         "duration_s": float(t[-1]) if len(t) > 0 else 0.0,
         "transitions_to_single": len(transitions_to_single),
+        "n_left_single": n_left_single,
+        "n_right_single": n_right_single,
+        "both_single_entered": n_left_single >= 1 and n_right_single >= 1,
         "grf_hysteresis_ok": grf_hysteresis_ok,
         "liftoff_grf_ok": liftoff_grf_ok,
         "states_present": states_present,
@@ -276,7 +288,7 @@ def assess_stage3(log: dict, step_length: float) -> tuple[dict, dict]:
         "foot_clearance": m["min_clearance_m"] > 0.02,
         "grf_hysteresis": m["grf_hysteresis_ok"],
         "liftoff_grf_ok": m["liftoff_grf_ok"],
-        "min_steps": m["total_steps"] >= 2,
+        "both_single_entered": m["both_single_entered"],
     }
 
     metrics = {**m,

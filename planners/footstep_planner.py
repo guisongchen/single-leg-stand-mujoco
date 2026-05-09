@@ -75,20 +75,18 @@ class FootstepPlanner:
         right_foot_y = -self.step_width / 2.0
 
         if cp is not None:
-            # How far the CP has progressed ahead of the support foot
-            # along the walking direction.
-            cp_progress = float(
-                np.dot(cp[:2] - support_foot_pos[:2], step_dir[:2])
-            )
-            # The foot's CoP centre lies ~3.5 cm ahead of the ankle
-            # (body origin).  Placing the ankle just behind the CP
-            # puts the CP inside the forward CoP region, which extends
-            # to +12 cm from the ankle.
-            #   x_ankle = cp_progress − 0.035  (CoP centre under CP)
-            #   x_ankle ≥ cp_progress − 0.155  (toe can still reach CP)
-            # Clamp: never step backward, never exceed nominal length.
-            ankle_progress = np.clip(cp_progress - 0.035, 0.0, self.step_length)
-            target_x = support_foot_pos[0] + step_dir[0] * ankle_progress
+            # Nominal step in walking direction
+            nom_x = support_foot_pos[0] + step_dir[0] * self.step_length
+
+            # CP-based correction: if the CP leads the nominal foot position
+            # the step is extended; if it lags the step is shortened.
+            # k_cp = 0.5 makes CP account for ~50 % of the step correction.
+            # Clamp: never step backward, at most 2× nominal length.
+            k_cp = 0.5
+            cp_offset = float(np.dot(cp[:2] - support_foot_pos[:2], step_dir[:2]))
+            cp_correction = k_cp * (cp_offset - 0.035)  # 3.5 cm = CoP centre bias
+            cp_correction = np.clip(cp_correction, -self.step_length, self.step_length)
+            target_x = nom_x + step_dir[0] * cp_correction
         else:
             target_x = (support_foot_pos[0]
                         + step_dir[0] * self.step_length)

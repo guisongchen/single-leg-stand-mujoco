@@ -64,6 +64,7 @@ class WalkingController(QPWBCController):
         self.step_height = float(wcfg.get("step_height", 0.05))
         self.swing_duration = float(wcfg.get("swing_duration", 2.0))
         self.swing_lift_duration = float(wcfg.get("swing_lift_duration", 1.2))
+        self.swing_settle_duration = float(wcfg.get("swing_settle_duration", 0.2))
         self.min_single_duration = float(wcfg.get("min_single_duration", 0.50))
         self.init_duration = float(wcfg.get("init_duration", 0.1))
         self.double_support_duration = float(wcfg.get("double_support_duration", 0.15))
@@ -292,15 +293,19 @@ class WalkingController(QPWBCController):
             else:
                 self.w_posture = tcfg.get("single_leg_w_posture", 1.0)
         if is_landing or self._phase in (LEFT_SINGLE, RIGHT_SINGLE):
-            # During single support the CoP inequality constraints in the
-            # QP already bound the CoM to the support polygon.  Adding an
-            # explicit CoM point-target would compete with the swing-leg
-            # repositioning task.  Drop the CoM task — the QP is free to
-            # let the CoM drift within the CoP envelope while it moves the
-            # swing foot.
-            J_com_qp = np.zeros((0, nv))
-            com_accel_des_qp = np.zeros(0)
-            com_z_task = []
+            # During the settle period (first swing_settle_duration seconds),
+            # the swing foot isn't moving, so the CoM task doesn't conflict
+            # with swing repositioning.  Keep the CoM task to prevent yaw
+            # drift and CoM wandering.
+            if dt_phase < self.swing_settle_duration:
+                J_com_qp = J_com
+                com_accel_des_qp = com_accel_des
+                com_z_task = []
+            else:
+                # After settle, drop CoM so swing can reposition freely
+                J_com_qp = np.zeros((0, nv))
+                com_accel_des_qp = np.zeros(0)
+                com_z_task = []
         else:
             J_com_qp = J_com
             com_accel_des_qp = com_accel_des
@@ -321,6 +326,8 @@ class WalkingController(QPWBCController):
             swing_task=None,  # we fold swing into extra_tasks
             extra_tasks=all_extra if all_extra else None,
         )
+
+        # ---- Post-QP support foot Z correction (disabled — causes OSQP infeasibility)
 
         # Restore weights and damping
         if old_weights is not None:
@@ -576,11 +583,16 @@ class WalkingController(QPWBCController):
                 left_accel[2] += a_lift
                 if swing_anchor is not None:
                     left_accel[:2] += -kp_ws_xy * (swing_pos[:2] - swing_anchor[:2]) - kd_ws_xy * left_vel[:2]
+                # Support foot (right): velocity damping + z-anchor to ground
+                right_accel = -foot_kd * right_vel
+                right_pos = self.env.get_body_pos("right_foot")
+                right_z_err = self._ground_z - right_pos[2]
+                right_accel[2] += 40.0 * right_z_err
                 active_feet = [
                     {"jacobian": J_left, "name": "left_foot",
                      "accel_offset": left_accel},
                     {"jacobian": J_right, "name": "right_foot",
-                     "accel_offset": -foot_kd * right_vel},
+                     "accel_offset": right_accel},
                 ]
             else:
                 swing_pos = self.env.get_body_pos("right_foot")
@@ -588,9 +600,14 @@ class WalkingController(QPWBCController):
                 right_accel[2] += a_lift
                 if swing_anchor is not None:
                     right_accel[:2] += -kp_ws_xy * (swing_pos[:2] - swing_anchor[:2]) - kd_ws_xy * right_vel[:2]
+                # Support foot (left): velocity damping + z-anchor to ground
+                left_accel = -foot_kd * left_vel
+                left_pos = self.env.get_body_pos("left_foot")
+                left_z_err = self._ground_z - left_pos[2]
+                left_accel[2] += 40.0 * left_z_err
                 active_feet = [
                     {"jacobian": J_left, "name": "left_foot",
-                     "accel_offset": -foot_kd * left_vel},
+                     "accel_offset": left_accel},
                     {"jacobian": J_right, "name": "right_foot",
                      "accel_offset": right_accel},
                 ]
@@ -600,7 +617,7 @@ class WalkingController(QPWBCController):
             extra_tasks = self._build_pelvis_orientation_task()
 
         elif self._phase in (LEFT_SINGLE, RIGHT_SINGLE):
-            # Support foot hard, swing foot soft tracking
+            # Support foot Jacobian selection
             if self._support_foot_name == "left":
                 J_support = J_left
                 J_swing = J_right
@@ -608,44 +625,33 @@ class WalkingController(QPWBCController):
                 J_support = J_right
                 J_swing = J_left
 
-            support_fz = self._compute_grf(f"{self._support_foot_name}_foot")
-            if support_fz < 5.0:
-                # Support foot lost contact — degrade to soft position tracking
-                # to avoid QP infeasibility from an unfulfillable hard equality.
-                support_body_pos = self.env.get_body_pos(
-                    f"{self._support_foot_name}_foot"
-                )
-                target_pos = np.array([
-                    support_body_pos[0],
-                    support_body_pos[1],
-                    self._support_foot_ground_z,
-                ])
-                support_vel = J_support[:3] @ data.qvel
-                support_accel_des = (
-                    self.support_fallback_kp * (target_pos - support_body_pos)
-                    + self.support_fallback_kd * (-support_vel)
-                )
-                active_feet = []
-                extra_tasks = self._build_pelvis_orientation_task()
-                extra_tasks.append((
-                    self.support_fallback_weight,
-                    J_support[:3],
-                    support_accel_des,
-                ))
-            else:
-                foot_kd = self.cfg.get("transition", {}).get("foot_kd", 40.0)
-                support_vel = J_support @ data.qvel
-                # TransitionController-style: velocity damping only.
-                # A PD anchor over-constrains the foot and fights balance.
-                support_accel = -foot_kd * support_vel
-                active_feet = [
-                    {
-                        "jacobian": J_support,
-                        "name": f"{self._support_foot_name}_foot",
-                        "accel_offset": support_accel,
-                    },
-                ]
-                extra_tasks = self._build_pelvis_orientation_task()
+            # Support foot: 3-DOF friction cone (XYZ) + hard orientation constraint.
+            # This provides:
+            # 1. Friction limits via the XYZ cone (prevents horizontal slip)
+            # 2. Hard orientation constraint (prevents yaw drift)
+            # 3. Soft position tracking (allows vertical compliance, prevents bounce)
+            # The XYZ wrench in active_feet provides friction cone constraints.
+            # The orientation constraint and position tracking are extra_tasks.
+            support_pos = self.env.get_body_pos(f"{self._support_foot_name}_foot")
+            support_vel_full = J_support @ data.qvel
+            target_3d = np.array([
+                support_pos[0],
+                support_pos[1],
+                self._support_foot_ground_z,
+            ])
+            sup_pos_accel = (
+                400.0 * (target_3d - support_pos)
+                + 40.0 * (-support_vel_full[:3])
+            )
+            # Hard orientation constraint with velocity damping
+            support_orient_accel = -40.0 * support_vel_full[3:]
+
+            active_feet = [
+                {"jacobian": J_support[:3], "name": f"{self._support_foot_name}_foot"},
+            ]
+            extra_tasks = self._build_pelvis_orientation_task()
+            extra_tasks.append((1000.0, J_support[:3], sup_pos_accel))
+            extra_tasks.append((np.sqrt(200.0), J_support[3:], support_orient_accel))
 
             # Swing foot task: trajectory tracking for the full swing duration
             # (lift + hold + descent).  The quintic profile naturally brings the
@@ -655,74 +661,73 @@ class WalkingController(QPWBCController):
                 self._phase in (LEFT_SINGLE, RIGHT_SINGLE)
                 and dt_phase >= self.swing_lift_duration
             )
-            if active_feet and self.swing_planner is not None:
-                # Clamp to swing_duration so the trajectory holds at target after landing
-                dt_traj = min(dt_phase, self.swing_duration)
-                swing_pos_traj, swing_vel_traj, swing_accel_traj = self.swing_planner.evaluate(dt_traj)
-                current_swing_pos = self.env.get_body_pos(f"{self._swing_foot_name}_foot")
-                current_swing_vel = J_swing[:3] @ data.qvel
+            if self.swing_planner is not None:
+                # During the settle period, use very low swing weights so
+                # the support foot can stabilise before the swing begins.
+                settle = self.swing_settle_duration
+                if dt_phase < settle:
+                    # Don't start the swing trajectory yet; hold the foot in place
+                    swing_tasks.append((1.0, J_swing[2:3], np.array([0.0])))
+                    swing_tasks.append((0.5, J_swing[:2], np.array([0.0, 0.0])))
+                else:
+                    dt_traj = min(dt_phase - settle, self.swing_duration)
+                    swing_pos_traj, swing_vel_traj, swing_accel_traj = self.swing_planner.evaluate(dt_traj)
+                    current_swing_pos = self.env.get_body_pos(f"{self._swing_foot_name}_foot")
+                    current_swing_vel = J_swing[:3] @ data.qvel
 
-                swing_kp = self.cfg.get("transition", {}).get("swing_kp", 50.0)
-                swing_kd = self.cfg.get("transition", {}).get("swing_kd", 15.0)
+                    swing_kp = self.cfg.get("transition", {}).get("swing_kp", 50.0)
+                    swing_kd = self.cfg.get("transition", {}).get("swing_kd", 15.0)
 
-                swing_accel_des = (
-                    swing_accel_traj
-                    + swing_kp * (swing_pos_traj - current_swing_pos)
-                    + swing_kd * (swing_vel_traj - current_swing_vel)
-                )
+                    swing_accel_des = (
+                        swing_accel_traj
+                        + swing_kp * (swing_pos_traj - current_swing_pos)
+                        + swing_kd * (swing_vel_traj - current_swing_vel)
+                    )
 
-                # After the planned trajectory ends the foot tends to stall a few
-                # millimetres above ground.  Add a gentle constant downward push
-                # so the spheres actually make contact.
-                if dt_phase > self.swing_duration:
-                    land_accel = self.cfg.get("transition", {}).get("swing_land_accel", 3.0)
-                    swing_accel_des[2] -= land_accel
+                    if dt_phase > settle + self.swing_duration:
+                        land_accel = self.cfg.get("transition", {}).get("swing_land_accel", 3.0)
+                        swing_accel_des[2] -= land_accel
 
-                phase_progress = min(dt_phase / self.swing_duration, 1.0)
-                xy_weight, z_weight = self._compute_swing_weights(phase_progress)
+                    phase_progress = min((dt_phase - settle) / self.swing_duration, 1.0)
+                    xy_weight, z_weight = self._compute_swing_weights(phase_progress)
 
-                # Track swing Z and XY during single support.  The CoM task
-                # is dropped during this phase (see compute()) — the CoP
-                # inequality constraints already keep the CoM inside the
-                # support polygon, and removing the CoM point-target frees
-                # the QP to reposition the swing leg without conflict.
-                swing_tasks.append((self.swing_z_weight, J_swing[2:3], swing_accel_des[2:3]))
-                if self.step_length > 0.0:
+                    swing_tasks.append((self.swing_z_weight, J_swing[2:3], swing_accel_des[2:3]))
+                    xy_weight, _ = self._compute_swing_weights(phase_progress)
                     swing_tasks.append((xy_weight, J_swing[:2], swing_accel_des[:2]))
 
         elif self._phase == DOUBLE_SUPPORT:
-            # Both feet hard-constrained.  The landing foot's Z follows a
-            # quintic descent profile that decelerates to zero velocity
-            # at ground level, eliminating the impact bounce.
+            # Landing foot: hard XY + orientation constraints, soft Z descent.
+            # Hard Z would demand a contact force that doesn't exist yet (foot
+            # airborne), causing the QP to invent lambda and ruining torque
+            # recovery.  Free Z means no incentive to reach the ground.
+            # Soft Z descent gives the QP a reason to push the foot down while
+            # tolerating the gap between desired and achieved contact.
             landing_name = "right_foot" if self._next_support_name == "left" else "left_foot"
-            landing_jac = J_right if landing_name == "right_foot" else J_left
+            support_name = "left_foot" if landing_name == "right_foot" else "right_foot"
+            J_landing = J_right if landing_name == "right_foot" else J_left
+            J_support = J_left if support_name == "left_foot" else J_right
 
-            # Build base hard constraints (zero acceleration for support)
-            left_offset = np.zeros(6)
-            right_offset = np.zeros(6)
-
-            # Smooth descent profile for landing foot Z
-            dt = self.env.data.time - self._phase_start_time
-            z_des, vz_des, az_des = self._evaluate_descent(dt)
-
-            pos = self.env.get_body_pos(landing_name)
-            vel = landing_jac[2] @ data.qvel
-            kp_d = 200.0
-            kd_d = 60.0
-            a_z = az_des + kp_d * (z_des - pos[2]) + kd_d * (vz_des - vel)
-
-            if landing_name == "left_foot":
-                left_offset[2] = a_z
-            else:
-                right_offset[2] = a_z
-
+            J_landing_partial = np.vstack([J_landing[:2], J_landing[3:]])
             active_feet = [
-                {"jacobian": J_left, "name": "left_foot",
-                 "accel_offset": left_offset},
-                {"jacobian": J_right, "name": "right_foot",
-                 "accel_offset": right_offset},
+                {"jacobian": J_support, "name": support_name},
+                {"jacobian": J_landing_partial, "name": landing_name},
             ]
             extra_tasks = self._build_pelvis_orientation_task()
+
+            # Soft Z descent for landing foot during DOUBLE_SUPPORT.
+            # Hard Z would demand a contact force that doesn't exist yet (foot
+            # airborne), causing the QP to invent lambda.  Free Z means no
+            # incentive to reach the ground.  Soft Z pushes the foot down.
+            landing_pos = self.env.get_body_pos(landing_name)
+            landing_vel_z = J_landing[2] @ data.qvel
+            z_descent_kp = float(self.cfg.get("transition", {}).get("ds_z_descent_kp", 80.0))
+            z_descent_kd = float(self.cfg.get("transition", {}).get("ds_z_descent_kd", 10.0))
+            z_descent_weight = float(self.cfg.get("transition", {}).get("ds_z_descent_weight", 500.0))
+            landing_accel_z = (
+                z_descent_kp * (self._ground_z - landing_pos[2])
+                - z_descent_kd * landing_vel_z
+            )
+            extra_tasks.append((z_descent_weight, J_landing[2:3], np.array([landing_accel_z])))
 
         # ---- Contact-loss downgrade for multi-foot phases ---------------
         if self._phase in (BIPEDAL_INIT, WEIGHT_SHIFT_L, WEIGHT_SHIFT_R,
@@ -870,7 +875,7 @@ class WalkingController(QPWBCController):
         # shift toward the landing foot.  Avoiding contact during single
         # support eliminates the impact bounce; leaving a small gap
         # ensures the foot doesn't accidentally graze the ground.
-        near_ground_z = self._ground_z + 0.01
+        near_ground_z = self._ground_z + 0.005
         near_ground_target = self._swing_target.copy()
         near_ground_target[2] = near_ground_z
 
@@ -1024,12 +1029,10 @@ class WalkingController(QPWBCController):
         """Extend base wrench cones with torsional friction for 6-D contacts.
 
         Torsional constraint is skipped during single-support phases: the pelvis
-        orientation task demands yaw torque that would otherwise bind against the
-        limit, causing foot slip.
+        orientation task demands yaw torque, but the torsional constraint
+        is essential to prevent yaw drift during single support.
         """
         A, l, u = super()._build_wrench_cones(nv, active_feet)
-        if self._phase in (LEFT_SINGLE, RIGHT_SINGLE):
-            return A, l, u
 
         # Count how many extra rows we need for torsional friction
         lambda_dims = [foot["jacobian"].shape[0] for foot in active_feet]
