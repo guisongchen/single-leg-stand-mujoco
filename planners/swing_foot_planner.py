@@ -80,10 +80,10 @@ class SwingTrajectoryPlanner:
             s_desc = (s - self._rise_frac - self._hold_frac) / self._descent_frac
             s_desc = np.clip(s_desc, 0.0, 1.0)
             z, dz, d2z = self._quintic_profile(s_desc)
-            # quintic goes 0->1, we want 1->0
-            z_pos = z_apex - self.lift_height * z
-            z_vel = -self.lift_height * dz / (self._descent_frac * self.swing_duration)
-            z_accel = -self.lift_height * d2z / ((self._descent_frac * self.swing_duration) ** 2)
+            # quintic goes 0->1, we want z_apex -> z_end
+            z_pos = z_apex - (z_apex - z_end) * z
+            z_vel = -(z_apex - z_end) * dz / (self._descent_frac * self.swing_duration)
+            z_accel = -(z_apex - z_end) * d2z / ((self._descent_frac * self.swing_duration) ** 2)
 
         pos = np.array([xy[0], xy[1], z_pos])
         vel = np.array([xy_vel[0], xy_vel[1], z_vel])

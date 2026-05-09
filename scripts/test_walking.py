@@ -42,8 +42,13 @@ def run_simulation(env: G1Env, controller: WalkingController, duration: float) -
         "right_grf": [],
     }
 
-    left_init = env.get_body_pos("left_foot")[:2].copy()
-    right_init = env.get_body_pos("right_foot")[:2].copy()
+    # Snapshot foot positions at the start of each phase; updated on every
+    # state transition so "slip" measures drift within the current phase.
+    phase_start_pos = {
+        "left": env.get_body_pos("left_foot")[:2].copy(),
+        "right": env.get_body_pos("right_foot")[:2].copy(),
+    }
+    prev_state = None
 
     for _ in range(n_steps):
         try:
@@ -64,17 +69,28 @@ def run_simulation(env: G1Env, controller: WalkingController, duration: float) -
         left_pos = env.get_body_pos("left_foot")
         right_pos = env.get_body_pos("right_foot")
 
+        # Detect phase transition and re-snapshot foot positions
+        if state != prev_state:
+            phase_start_pos["left"] = left_pos[:2].copy()
+            phase_start_pos["right"] = right_pos[:2].copy()
+            prev_state = state
+
         quat = env.get_pelvis_quat()
         roll, pitch, _ = euler_from_quat(*quat)
 
+        # Support slip: measure the foot that is supposed to stay put.
         if state == "LEFT_SINGLE":
-            slip = np.linalg.norm(right_pos[:2] - right_init)
+            slip = np.linalg.norm(left_pos[:2] - phase_start_pos["left"])
         elif state == "RIGHT_SINGLE":
-            slip = np.linalg.norm(left_pos[:2] - left_init)
+            slip = np.linalg.norm(right_pos[:2] - phase_start_pos["right"])
+        elif state == "WEIGHT_SHIFT_L":
+            slip = np.linalg.norm(left_pos[:2] - phase_start_pos["left"])
+        elif state == "WEIGHT_SHIFT_R":
+            slip = np.linalg.norm(right_pos[:2] - phase_start_pos["right"])
         else:
             slip = max(
-                np.linalg.norm(left_pos[:2] - left_init),
-                np.linalg.norm(right_pos[:2] - right_init),
+                np.linalg.norm(left_pos[:2] - phase_start_pos["left"]),
+                np.linalg.norm(right_pos[:2] - phase_start_pos["right"]),
             )
 
         log["t"].append(t_now)
