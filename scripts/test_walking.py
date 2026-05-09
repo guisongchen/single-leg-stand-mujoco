@@ -284,7 +284,7 @@ def main() -> None:
 
     # Stage 1: zero forward motion
     cfg["walking"]["step_length"] = 0.0
-    cfg["walking"]["double_support_duration"] = 0.5
+    cfg["walking"]["double_support_duration"] = 0.2
 
     env = G1Env(CONFIG_PATH)
     env.reset()

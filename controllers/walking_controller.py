@@ -253,6 +253,13 @@ class WalkingController(QPWBCController):
         # oppose the swing-z task.
         q_ref_posture = self.q_ref
 
+        # ---- Temporarily boost single-support damping ------------------
+        old_kd_com = None
+        if self._phase in (LEFT_SINGLE, RIGHT_SINGLE):
+            tcfg = self.cfg.get("transition", {})
+            old_kd_com = self.kd_com
+            self.kd_com = tcfg.get("single_leg_kd_com", 40.0)
+
         com_accel_des, cam_rate_des, joint_accel_des, J_cam = self._compute_task_targets(
             model, data, com_pos, com_target, q_ref_posture, q, dq
         )
@@ -309,11 +316,13 @@ class WalkingController(QPWBCController):
             extra_tasks=all_extra if all_extra else None,
         )
 
-        # Restore weights
+        # Restore weights and damping
         if old_weights is not None:
             self.w_com = old_weights["w_com"]
             self.w_cam = old_weights["w_cam"]
             self.w_posture = old_weights["w_posture"]
+        if old_kd_com is not None:
+            self.kd_com = old_kd_com
 
         return tau
 
@@ -362,6 +371,7 @@ class WalkingController(QPWBCController):
         self._grf_arm_time = 0.0
         self._single_support_com_target = None
         self._support_foot_anchor = self.env.get_body_pos(f"{support_foot}_foot").copy()
+        self._swing_foot_anchor = self.env.get_body_pos(f"{self._swing_foot_name}_foot").copy()
 
         # Smooth CoM interpolation from current position to support foot centre
         com_now = compute_com_position(self.env.model, self.env.data)
@@ -478,20 +488,34 @@ class WalkingController(QPWBCController):
             a_lift = 1.0 * unload_frac
 
             # TransitionController-style: support foot hard with velocity
-            # damping only, swing foot gets gentle lift bias.
+            # damping only, swing foot gets gentle lift bias plus a small XY
+            # PD anchor so it doesn't slide outward during unloading.
+            swing_anchor = getattr(self, "_swing_foot_anchor", None)
+            kp_ws_xy = 50.0
+            kd_ws_xy = 5.0
             if self._swing_foot_name == "left":
+                swing_pos = self.env.get_body_pos("left_foot")
+                left_accel = -foot_kd * left_vel
+                left_accel[2] += a_lift
+                if swing_anchor is not None:
+                    left_accel[:2] += -kp_ws_xy * (swing_pos[:2] - swing_anchor[:2]) - kd_ws_xy * left_vel[:2]
                 active_feet = [
                     {"jacobian": J_left, "name": "left_foot",
-                     "accel_offset": np.array([0.0, 0.0, a_lift, 0.0, 0.0, 0.0]) - foot_kd * left_vel},
+                     "accel_offset": left_accel},
                     {"jacobian": J_right, "name": "right_foot",
                      "accel_offset": -foot_kd * right_vel},
                 ]
             else:
+                swing_pos = self.env.get_body_pos("right_foot")
+                right_accel = -foot_kd * right_vel
+                right_accel[2] += a_lift
+                if swing_anchor is not None:
+                    right_accel[:2] += -kp_ws_xy * (swing_pos[:2] - swing_anchor[:2]) - kd_ws_xy * right_vel[:2]
                 active_feet = [
                     {"jacobian": J_left, "name": "left_foot",
                      "accel_offset": -foot_kd * left_vel},
                     {"jacobian": J_right, "name": "right_foot",
-                     "accel_offset": np.array([0.0, 0.0, a_lift, 0.0, 0.0, 0.0]) - foot_kd * right_vel},
+                     "accel_offset": right_accel},
                 ]
             # Pelvis orientation task stabilises the trunk while weight
             # transfers; without it the robot rotates freely and the fixed-foot
@@ -588,24 +612,15 @@ class WalkingController(QPWBCController):
                     swing_tasks.append((xy_weight, J_swing[:2], swing_accel_des[:2]))
 
         elif self._phase == DOUBLE_SUPPORT:
-            # Both feet hard-fixed so the robot can lean and shift CoM without
-            # the feet slipping away.  A weak PD anchor on top of zero accel
-            # handles any residual velocity from the previous phase.
+            # Velocity damping only (no PD anchors).  Rigid anchors prevent
+            # the feet from sliding to a new equilibrium when the CoM arrives
+            # off-centre after an imperfect landing.  Damping absorbs residual
+            # velocity without fighting balance corrections.
             foot_kd = self.cfg.get("transition", {}).get("foot_kd", 40.0)
             left_vel = J_left @ data.qvel
             right_vel = J_right @ data.qvel
-            left_pos = self.env.get_body_pos("left_foot")
-            right_pos = self.env.get_body_pos("right_foot")
-            left_anchor = getattr(self, "_double_support_left_anchor", left_pos)
-            right_anchor = getattr(self, "_double_support_right_anchor", right_pos)
-            kp_ds = 200.0
-            kd_ds = 20.0
-            left_accel = np.zeros(6)
-            left_accel[:3] = -kp_ds * (left_pos - left_anchor) - kd_ds * left_vel[:3]
-            left_accel[3:] = -kd_ds * left_vel[3:]
-            right_accel = np.zeros(6)
-            right_accel[:3] = -kp_ds * (right_pos - right_anchor) - kd_ds * right_vel[:3]
-            right_accel[3:] = -kd_ds * right_vel[3:]
+            left_accel = -foot_kd * left_vel
+            right_accel = -foot_kd * right_vel
             active_feet = [
                 {"jacobian": J_left, "name": "left_foot", "accel_offset": left_accel},
                 {"jacobian": J_right, "name": "right_foot", "accel_offset": right_accel},
@@ -811,6 +826,17 @@ class WalkingController(QPWBCController):
         dt_phase = self.env.data.time - self._phase_start_time
         if dt_phase < self.min_single_duration:
             return False
+
+        # ---- GRF-based early touchdown ----------------------------------
+        # If the swing foot has picked up significant ground reaction force,
+        # switch immediately instead of waiting for the kinematic settling
+        # timer.  This eliminates the 0.1-0.2 s drift window where unmodelled
+        # contact forces destabilise the robot.
+        grf_swing = self._compute_grf(f"{swing_foot_name}_foot")
+        mg = self._total_mass * 9.81
+        if grf_swing > self.grf_touchdown_threshold * mg:
+            self._touchdown_timer = 0.0
+            return True
 
         model = self.env.model
         data = self.env.data

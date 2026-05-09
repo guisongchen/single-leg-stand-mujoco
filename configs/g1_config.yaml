@@ -125,6 +125,7 @@ transition:
   single_leg_w_com: 200.0    # boosted CoM weight during single-leg phase
   single_leg_w_cam: 20.0     # reduced CAM weight so swing-leg motion isn't blocked
   single_leg_w_posture: 0.01 # reduced posture weight during single-leg phase
+  single_leg_kd_com: 40.0    # boosted CoM damping during single-leg phase
 
   # Bipedal return phase (single-leg -> bipedal)
   t_bipedal_return: 7.0      # seconds to lower swing foot and settle
@@ -143,7 +144,7 @@ walking:
   swing_lift_duration: 0.36  # seconds before landing phase starts
   min_single_duration: 0.50  # minimum seconds in single support
   init_duration: 0.1         # seconds in INIT before first weight shift
-  double_support_duration: 0.30   # seconds per double-support phase
+  double_support_duration: 0.20   # seconds per double-support phase
   phase_timeout: 5.0         # seconds before emergency bipedal fallback
   forward_direction: [1.0, 0.0]   # world-frame walking direction (xy only)
   double_support_com_bias: 0.70   # bias toward next support foot in DS

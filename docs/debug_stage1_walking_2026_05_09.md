@@ -174,3 +174,68 @@ After each change, run in this order:
 3. `scripts/test_walking.py` -> verify all 7 metrics pass
 
 Do **not** tune parameters until the root cause (touchdown delay + double-support rigidity) is confirmed fixed by the trace scripts.
+
+---
+
+## Update: 2026-05-09 — Four Immediate Fixes Implemented and Tested
+
+### Fixes applied
+
+| # | Fix | Code location | Config change |
+|---|-----|---------------|---------------|
+| 1 | GRF-based early touchdown | `_check_touchdown()` — bypasses 0.1 s kinematic timer when `grf_swing > grf_touchdown_threshold * mg` | none |
+| 2 | Double-support velocity damping | `_build_phase_tasks()` `DOUBLE_SUPPORT` branch — replaced `kp=200` PD anchors with `-foot_kd * vel` | none |
+| 3 | Shorter double-support duration | `test_walking.py` override 0.5 s → 0.2 s; config 0.30 s → 0.20 s | `double_support_duration: 0.20` |
+| 4 | Boosted CoM damping in single support | `compute()` — temporarily overrides `kd_com` to `single_leg_kd_com` (40.0) during `LEFT_SINGLE` / `RIGHT_SINGLE` | `single_leg_kd_com: 40.0` |
+| 5 | Weight-shift XY anchor (quick tune) | `_enter_weight_shift()` — snapshots swing-foot position; `_build_phase_tasks()` adds `kp=50, kd=5` XY PD anchor to unloading foot | none |
+
+### Results
+
+**First single-support phase (`LEFT_SINGLE`) — FIXED.**
+
+| Metric | Before fixes | After fixes |
+|--------|-------------|-------------|
+| Touchdown time | t = 3.1 s | t = 2.9 s |
+| CoM at touchdown | y = 0.155 (outside support) | y = 0.115 (on support centre) |
+| Controller crash | t = 3.1 s | None (runs full 10 s) |
+
+The GRF early touchdown and CoM damping completely eliminated the CoM overshoot that was causing the first-cycle collapse.
+
+**New failure mode: `WEIGHT_SHIFT_R` never reaches `RIGHT_SINGLE`.**
+
+After the first successful step, the robot enters `WEIGHT_SHIFT_R` but cannot transfer enough weight to the right foot before falling. Key observations from the trace:
+
+- The required lateral CoM shift is **23.4 cm** (from y = +0.115 after `LEFT_SINGLE` to y = −0.119 at the right foot).
+- The first weight shift (`WEIGHT_SHIFT_L`) only needed **12 cm** (from y = 0.000 to y = +0.119) and succeeded.
+- The CoM planner's 2.5 s interpolation is too slow for 23 cm. The robot begins falling after shifting only ~5 cm.
+- The left foot intermittently touches back down (885 N spike at t = 4.1 s), preventing the right foot from reaching the 80 % GRF fire threshold.
+
+**Test metrics after fixes:**
+
+| Metric | Result |
+|--------|--------|
+| no_fall | FAIL (slow collapse during `WEIGHT_SHIFT_R`) |
+| left_foot_clearance | FAIL (never reaches `RIGHT_SINGLE`) |
+| right_foot_clearance | PASS |
+| support_slip | FAIL (> 5 mm during weight shift) |
+| min_steps | FAIL (1 step) |
+| states_present | PASS |
+| grf_hysteresis | PASS |
+
+### Assessment
+
+The four immediate fixes solved the **original** root cause (touchdown delay + CoM overshoot during single support). The new failure is a **secondary** issue: the first single-support phase leaves the CoM too far from the midline, making the return weight shift twice as long as the outgoing one. This is a gait-design problem, not a controller bug.
+
+**Decision:** Stop Stage 1 parameter tuning. The structural improvements (GRF touchdown, velocity damping, CoM damping, weight-shift anchor) are valuable and should be kept. The remaining issue requires either:
+- A faster CoM planner (`t_weight_shift` ≈ 1.0 s), or
+- A more aggressive double-support bias (`double_support_com_bias` > 0.70) to pre-position the CoM before weight shift.
+
+These are better addressed in the context of Stage 3 (small forward steps, `step_length = 0.10`) where momentum assists the weight transfer.
+
+### Files modified in this session
+
+- `controllers/walking_controller.py` — GRF touchdown, velocity damping in DS, CoM damping boost, weight-shift XY anchor
+- `configs/g1_config.yaml` — `double_support_duration: 0.20`, `single_leg_kd_com: 40.0`
+- `scripts/test_walking.py` — DS duration override 0.2 s
+- `docs/g1_foot_constrains.md` — added English review section
+- `docs/debug_stage1_walking_2026_05_09.md` — this report
