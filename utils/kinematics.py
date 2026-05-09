@@ -95,3 +95,27 @@ def euler_from_quat(qw, qx, qy, qz) -> tuple:
     yaw = np.arctan2(siny_cosp, cosy_cosp)
 
     return roll, pitch, yaw
+
+
+def compute_capture_point(com_pos: np.ndarray, com_vel: np.ndarray, gravity_z: float) -> np.ndarray:
+    """Compute the instantaneous capture point in the world XY plane.
+
+    CP = com_xy + com_vxy / omega, where omega = sqrt(g / com_z).
+
+    Parameters
+    ----------
+    com_pos : np.ndarray
+        CoM position [x, y, z] in world frame.
+    com_vel : np.ndarray
+        CoM velocity [vx, vy, vz] in world frame.
+    gravity_z : float
+        Magnitude of gravitational acceleration (positive scalar).
+
+    Returns
+    -------
+    cp : np.ndarray
+        Capture point [x, y] in world frame.
+    """
+    z_com = max(com_pos[2], 0.1)
+    omega = np.sqrt(gravity_z / z_com)
+    return com_pos[:2] + com_vel[:2] / omega

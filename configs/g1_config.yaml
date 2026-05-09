@@ -2,7 +2,7 @@ simulation:
   dt: 0.002  # 500 Hz, stable for humanoid contact dynamics
   gravity: [0.0, 0.0, -9.81]
   friction: 0.8
-  model_path: "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof_damped.xml"
+  model_path: "/home/ccc/projects/single_leg_stand_mujoco/models/scene_23dof_clean.xml"
 
 robot:
   # Floating base is excluded; these are the 23 actuated joints in qpos order
@@ -90,7 +90,7 @@ control:
   wbc_reg: 0.01
   wbc_reg_lambda: 0.001
   wbc_max_contact_force: 5000.0
-  wbc_tau_limit: 100.0       # QP actuator torque bound (N·m); null = disabled
+  wbc_tau_limit: 150.0      # QP actuator torque bound (N·m); null = disabled
 
 transition:
   # Which foot becomes the support foot during single-leg stance
@@ -106,8 +106,10 @@ transition:
   swing_rise_duration: 1.0   # seconds to reach full lift
 
   # Swing foot tracking gains (PD on acceleration)
-  swing_kp: 50.0
+  swing_kp: 120.0
   swing_kd: 15.0
+  swing_land_accel: 10.0    # extra downward z-accel after trajectory ends (m/s^2)
+  min_weight_shift_duration: 1.5  # minimum seconds in weight shift before single support
 
   # State-switch thresholds
   swing_unload_force: 20.0   # switch to single leg when swing fz drops below this (N)
@@ -121,5 +123,51 @@ transition:
   pelvis_kd: 5.0             # pelvis orientation PD derivative gain
   pelvis_weight: 5.0         # QP weight for pelvis orientation task
   single_leg_w_com: 200.0    # boosted CoM weight during single-leg phase
-  single_leg_w_cam: 200.0    # boosted CAM weight during single-leg phase
+  single_leg_w_cam: 20.0     # reduced CAM weight so swing-leg motion isn't blocked
   single_leg_w_posture: 0.01 # reduced posture weight during single-leg phase
+  single_leg_kd_com: 40.0    # boosted CoM damping during single-leg phase
+
+  # Bipedal return phase (single-leg -> bipedal)
+  t_bipedal_return: 7.0      # seconds to lower swing foot and settle
+  return_com_shift_duration: 2.0  # seconds to move CoM back to midpoint
+  return_foot_kd_boost: 2.0  # multiplier on foot_kd after touchdown
+  return_touchdown_fz: 20.0  # swing foot fz threshold for touchdown (N)
+  return_settle_duration: 1.0  # seconds after touchdown before switching to hard constraints
+  return_land_kp: 100.0      # PD proportional gain for soft landing impedance
+  return_land_kd: 40.0       # PD derivative gain for soft landing impedance
+
+walking:
+  step_length: 0.25          # forward distance per step (m)
+  step_width: 0.20           # lateral distance between feet (m)
+  step_height: 0.03          # swing foot clearance above ground (m)
+  swing_duration: 0.6        # total seconds for one swing phase
+  swing_lift_duration: 0.36  # seconds before landing phase starts
+  min_single_duration: 0.50  # minimum seconds in single support
+  init_duration: 0.1         # seconds in INIT before first weight shift
+  double_support_duration: 0.20   # seconds per double-support phase
+  phase_timeout: 5.0         # seconds before emergency bipedal fallback
+  forward_direction: [1.0, 0.0]   # world-frame walking direction (xy only)
+  double_support_com_bias: 0.70   # bias toward next support foot in DS
+
+transitions:
+  grf_arm_threshold: 0.50    # fraction of body weight to arm transition
+  grf_fire_threshold: 0.80   # fraction of body weight to fire transition
+  grf_arm_to_fire_delay: 0.05  # minimum seconds between arm and fire
+  grf_touchdown_threshold: 0.025 # fraction of body weight for touchdown
+  grf_liftoff_threshold: 5.0  # newtons; lifted foot must be below this
+  cp_abort_margin: 0.05      # metres outside both-foot hull to abort
+
+safety:
+  touchdown_xy_tolerance: 0.02   # metres from target xy to accept touchdown
+  touchdown_z_tolerance: 0.005  # metres from ground to accept touchdown
+
+swing_weights:
+  xy_early: 10.0             # swing-xy QP weight during first 60% of swing
+  xy_late: 10.0              # swing-xy QP weight during last 40% of swing
+  z: 200.0                   # swing-z QP weight (must be high for accurate landing)
+
+pelvis_orientation:
+  roll_weight: 0.5           # QP weight for pelvis roll regulation
+  pitch_weight: 0.5          # QP weight for pelvis pitch regulation
+  yaw_weight: 0.3            # QP weight for pelvis yaw regulation
+  target_yaw: 0.0            # desired pelvis yaw (rad)
