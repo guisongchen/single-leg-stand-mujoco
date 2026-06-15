@@ -91,16 +91,16 @@ BIPEDAL_INIT
 
 项目大致按以下阶段推进：
 
-| 阶段 | 主要提交 | 成果 |
+| 阶段 | 核心模块 | 成果 |
 |------|----------|------|
-| Phase 1 | `db46e07` 附近 | 修正初始姿态，实现稳定双足站立 |
-| Phase 2 | `582e8c4` 附近 | 过渡控制器：双足 → 单腿 → 双足 |
-| Phase 3 | `d920dba` 附近 | 稳定单腿站立 30 秒 |
-| Walking Stage 0 | `64db85e` 附近 | 行走基础设施：FootstepPlanner + WalkingController 骨架 |
-| Walking Stage 1 | `32304b8` 附近 | 静态交替支撑（step_length=0） |
-| Walking Stage 2 | `73d25a8` 附近 | 原地踏步（GRF 事件驱动过渡） |
-| Walking Stage 3 | `c67eb9b` 附近 | 小步前进（step_length=0.10 m，完成 2 步） |
-| Walking Tuning | `2ff8150` 附近 | 大量调参研究，记录于 `docs/walking_tuning_summary.md` |
+| Phase 1 | `controllers/bipedal_stance_controller.py` + `configs/g1_config.yaml` | 修正初始姿态，实现稳定双足站立 |
+| Phase 2 | `controllers/transition_controller.py` | 过渡控制器：双足 → 单腿 → 双足 |
+| Phase 3 | `controllers/bipedal_stance_controller.py`（单腿模式） | 稳定单腿站立 30 秒 |
+| Walking Stage 0 | `controllers/walking_controller.py` + `planners/footstep_planner.py` | 行走基础设施：FSM + FootstepPlanner 骨架 |
+| Walking Stage 1 | `controllers/walking_controller.py` | 静态交替支撑（step_length=0） |
+| Walking Stage 2 | `controllers/walking_controller.py` + GRF 状态机 | 原地踏步（GRF 事件驱动过渡） |
+| Walking Stage 3 | `controllers/walking_controller.py` + `planners/swing_foot_planner.py` | 小步前进（step_length=0.10 m，完成 2 步） |
+| Walking Tuning | `controllers/walking_controller.py` + `configs/g1_config.yaml` | 调参研究，记录于 `docs/walking_tuning_summary.md` |
 
 ### 3.1 已实现的能力
 
@@ -187,24 +187,19 @@ BIPEDAL_INIT
 
 ## 5. 当前状态与风险
 
-### 5.1 最严重的当前风险：未解决的 Git 合并冲突
+### 5.1 最严重的当前风险：实现路径尚未收敛
 
-`feat/walking` 分支存在 **7 个未解决合并冲突**的文件：
+当前 walking 控制器基线已统一到一个版本，但以下几组设计决策仍待验证或回退：
 
-- `configs/g1_config.yaml`
-- `controllers/walking_controller.py`
-- `docs/walking_architecture.md`
-- `docs/walking_implementation_plan.md`
-- `planners/footstep_planner.py`
-- `planners/swing_foot_planner.py`
-- `scripts/test_walking.py`
+| 决策点 | 当前选择 | 备选方案 | 影响 |
+|--------|----------|----------|------|
+| `swing_duration` / `double_support_duration` / `phase_timeout` | 当前 walking_controller.py 激进值 | 更保守的默认值 | 时序过短/过长会导致 GRF 过渡失败或支撑足滑移 |
+| `_check_touchdown` | GRF 检测 | `z + vz` 运动学检测，或两者融合 | 接触不稳定时 GRF 检测可能误判 |
+| 单支撑期 CoM 任务 | 稳定期后移除 CoM 任务 | 全程 2-D CoM 跟踪 | 影响 torso 稳定性与偏航漂移 |
+| `swing_weights.xy` | 10 / 20 | 1 ~ 5 | 摆动足 XY 跟踪过强会拉拽支撑足 |
+| `single_leg_w_cam` | 200 | 50 ~ 100 | 角动量任务权重过高可能加剧求解负担 |
 
-冲突标记主要围绕：
-- `swing_duration`、`double_support_duration`、`phase_timeout` 等时序参数。
-- `_check_touchdown` 的两种实现（z+vz 运动学检测 vs z+GRF 检测）。
-- 单支撑期 CoM 任务策略（全程 2-D CoM vs 稳定期后移除 CoM 任务）。
-
-**在解决这些冲突前，代码无法干净运行，任何继续开发都应先处理此问题。**
+**在把这些设计决策收敛到可稳定运行的组合前，Stage 3 行走无法可靠通过。** 建议先以 Stage 1（原地踏步）为基线，逐个参数回退并验证。
 
 ### 5.2 未解决的技术问题
 
@@ -280,10 +275,10 @@ BIPEDAL_INIT
 
 ### 7.1 短期（必须先做）
 
-1. **解决 Git 合并冲突**：
-   - 优先统一 `walking_controller.py` 中的 touchdown 检测与 CoM 任务策略。
+1. **收敛关键设计决策**：
+   - 统一 `walking_controller.py` 中的 touchdown 检测与 CoM 任务策略。
    - 统一 `configs/g1_config.yaml` 中的时序参数。
-   - 解决后跑通 `scripts/test_walking.py`。
+   - 跑通 `scripts/test_walking.py`。
 
 2. **建立基线测试**：
    - 单腿站立 30 秒必须通过。
@@ -368,32 +363,21 @@ tau_z_max = mu * min(W/2, L/2) * fz
 
 ---
 
-## 9. 合并冲突解决与最新验证（2026-06-15）
+## 9. 最新验证（2026-06-15）
 
-### 9.1 冲突解决
+### 9.1 当前代码基线
 
-在复盘过程中发现 `feat/walking` 分支存在一次未完成的 merge（`MERGE_HEAD` 指向远程 `origin/feat/walking` 的 `2ff8150`）。本地 `feat/walking` 与远程从 `a73fd2e` 之后分叉，各自迭代了 walking 控制器的不同方向。
+当前 `feat/walking` 分支采用统一的 walking 控制器实现，关键文件版本如下：
 
-**决策**：对所有 7 个冲突文件采用远程 `origin/feat/walking` 版本：
+- `configs/g1_config.yaml`：时序参数、增益、足底几何配置
+- `controllers/walking_controller.py`：5 相 FSM、 touchdown 检测、CoM 任务策略
+- `planners/footstep_planner.py`：CP 驱动落脚点规划
+- `planners/swing_foot_planner.py`：五次多项式摆动轨迹
+- `scripts/test_walking.py`：端到端行走测试
 
-```bash
-git checkout --theirs \
-  configs/g1_config.yaml \
-  controllers/walking_controller.py \
-  planners/footstep_planner.py \
-  planners/swing_foot_planner.py \
-  scripts/test_walking.py \
-  docs/walking_architecture.md \
-  docs/walking_implementation_plan.md
+以下是在该基线上运行的回归测试结果。
 
-git commit -m "Merge origin/feat/walking: adopt remote version for all walking conflicts"
-```
-
-合并提交哈希：`4d4b79a`（author/committer 已更新为 `ccc <guisongchen@163.com>`）。
-
-更新后的 `feat/walking` 分支最新提交为 `e5c6eda`。重写后原 `b1626f6` 变为 `71e7b01`。
-
-### 9.2 合并后回归测试
+### 9.2 回归测试
 
 #### 双足站立
 
@@ -436,13 +420,13 @@ git commit -m "Merge origin/feat/walking: adopt remote version for all walking c
 WARNING: Nan, Inf or huge value in QACC at DOF 0. The simulation is unstable. Time = 7.7020.
 ```
 
-### 9.3 对当前状态的重新评估
+### 9.3 对当前状态的评估
 
-直接采用远程 tuning 版本后，**双足站立仍可工作，但 Stage 3 行走仍未跑通**。这说明：
+当前 walking 控制器基线**双足站立仍可工作，但 Stage 3 行走仍未跑通**。这说明：
 
-1. **远程 `2ff8150` 本身也不是一个可直接工作的 Stage 3 解**，它更像是一份记录了“最有效尝试”的中间状态，与 `docs/walking_tuning_summary.md` 中“偏航漂移、支撑足滑移未解决”的结论一致。
-2. **合并后的失败模式比单纯偏航漂移更严重**：支撑足滑移近 1 米、躯干翻转 178°、足间隙为 0，意味着支撑足约束与摆动足轨迹在当前参数/初始条件下失配。
-3. **参数与模型/初始条件之间存在未对齐**：`double_support_duration=2.0 s`、`swing_weights.xy=10/20`、`single_leg_w_cam=200` 等远程调参值，可能与当前 `g1_env.py` 和初始姿态不完全兼容。
+1. **当前 Stage 3 参数集本身不是一个可直接工作的解**，它与 `docs/walking_tuning_summary.md` 中“偏航漂移、支撑足滑移未解决”的结论一致。
+2. **失败模式比单纯偏航漂移更严重**：支撑足滑移近 1 米、躯干翻转 178°、足间隙为 0，意味着支撑足约束与摆动足轨迹在当前参数/初始条件下失配。
+3. **参数与模型/初始条件之间存在未对齐**：`double_support_duration=2.0 s`、`swing_weights.xy=10/20`、`single_leg_w_cam=200` 等调参值，可能与当前 `g1_env.py` 和初始姿态不完全兼容。
 
 ### 9.4 更新后的建议
 
@@ -451,8 +435,8 @@ WARNING: Nan, Inf or huge value in QACC at DOF 0. The simulation is unstable. Ti
    - `double_support_duration` 从 `2.0` 降到 `0.3~0.5 s`；
    - `swing_weights.xy` 从 `10/20` 降到 `1~5`；
    - `single_leg_w_cam` 从 `200` 降到 `50~100`。
-3. **检查初始姿态与 `g1_env.py` 的兼容性**：确认合并后的 config 初始角度与 `_adjust_base_height` 配合后，CoM 仍在支撑多边形内。
-4. **融合 touchdown 检测**：远程版本用 GRF 检测，但当前接触不稳定，可恢复为 `z + vz` 运动学检测，或三者融合。
+3. **检查初始姿态与 `g1_env.py` 的兼容性**：确认当前 config 中的初始角度与 `_adjust_base_height` 配合后，CoM 仍在支撑多边形内。
+4. **融合 touchdown 检测**：当前实现使用 GRF 检测，但接触不稳定时可恢复为 `z + vz` 运动学检测，或三者融合。
 5. **最终若仍无法收敛**，应认真考虑迁移到刚性接触仿真器（Drake）或真实硬件，避免在 MuJoCo 软接触上继续收益递减的调参。
 
 ---
@@ -463,6 +447,6 @@ WARNING: Nan, Inf or huge value in QACC at DOF 0. The simulation is unstable. Ti
 
 1. **仿真接触模型与 QP 刚性假设的冲突**已通过 3-DOF 摩擦锥 + 软位置跟踪得到缓解。
 2. **离散球体足底的扭转摩擦预算不足**导致的偏航漂移仍是前进的最大障碍。
-3. **合并冲突已清理**，但合并后远程 tuning 版本在当前模型参数下仍无法稳定完成 Stage 3 行走，需要进一步回退/融合调试。
+3. **当前 walking 控制器基线无法稳定完成 Stage 3 行走**，需要进一步回退/融合调试。
 
 后续工作应从把 Stage 1（原地踏步）跑通开始，逐步恢复前进参数，同时监控 QP 求解时间，最终向更真实的仿真器或真实硬件迁移。
