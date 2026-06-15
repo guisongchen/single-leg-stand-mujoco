@@ -6,7 +6,7 @@ import numpy as np
 import yaml
 import mujoco
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from env.g1_env import G1Env
 from utils.kinematics import (
